@@ -73,3 +73,37 @@ iostat -x 1
 预期第一次遍历出现 SSD 读取，第二次读取相同热点时 `hits` 和 `h2d_bytes` 增长，而
 `storage_bytes` 基本不再增长。若 `iostat` 始终为零，先用 `findmnt -T 文件路径` 确认监控的
 设备，并检查文件是否位于 RAID、LVM、容器 overlay 或网络文件系统上。
+
+## 正式 Benchmark 矩阵
+
+仓库内提供了一个面向 MVP 的固定矩阵脚本：
+
+```bash
+HCACHE_BENCH_FILE=/mnt/gds2/cwd_test/kvikio_hcache/bench-1g.bin \
+REQUESTS=100000 \
+REPEATS=5 \
+RESULT_ROOT=/mnt/gds2/cwd_test/kvikio_hcache/results-formal \
+scripts/run_gds_hcache_matrix.sh \
+  2>&1 | tee /tmp/hcache_matrix_formal.log
+```
+
+当前正式矩阵只包含 `64 KiB` 和 `256 KiB` 两种 cache line，故意去掉了冒烟测试中失败的
+`16 KiB` cache line。矩阵如下：
+
+- I/O size：`4 KiB`、`16 KiB`、`64 KiB`
+- HCache line size：`64 KiB`、`256 KiB`
+- HCache capacity：`16 MiB`、`32 MiB`、`64 MiB`、`128 MiB`
+- Hot set：默认 `64 MiB`
+- Baseline：GDS no-cache、POSIX no-cache
+
+汇总结果：
+
+```bash
+python scripts/summarize_gds_hcache_matrix.py \
+  /mnt/gds2/cwd_test/kvikio_hcache/results-formal
+```
+
+输出文件：
+
+- `/mnt/gds2/cwd_test/kvikio_hcache/results-formal/raw_results.csv`
+- `/mnt/gds2/cwd_test/kvikio_hcache/results-formal/summary.csv`
