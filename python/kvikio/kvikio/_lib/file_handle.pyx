@@ -10,7 +10,7 @@ from typing import Optional, Union
 
 from posix cimport fcntl
 
-from libc.stdint cimport uintptr_t
+from libc.stdint cimport uint64_t, uintptr_t
 from libcpp cimport bool
 from libcpp.string cimport string
 from libcpp.utility cimport move, pair
@@ -33,6 +33,13 @@ cdef extern from "cuda.h":
 
 
 cdef extern from "<kvikio/file_handle.hpp>" namespace "kvikio" nogil:
+    cdef cppclass HostCacheStats:
+        uint64_t hits
+        uint64_t misses
+        uint64_t evictions
+        uint64_t storage_bytes
+        uint64_t h2d_bytes
+
     cdef cppclass FileHandle:
         FileHandle() except +
         FileHandle(int fd) except +
@@ -88,6 +95,8 @@ cdef extern from "<kvikio/file_handle.hpp>" namespace "kvikio" nogil:
             CUstream stream
         ) except +
         bool is_direct_io_supported()
+        HostCacheStats host_cache_stats()
+        void clear_host_cache()
 
 
 cdef class CuFile:
@@ -126,6 +135,22 @@ cdef class CuFile:
         with nogil:
             result = self._handle.fd_open_flags()
         return result
+
+    def host_cache_stats(self) -> dict[str, int]:
+        cdef HostCacheStats result
+        with nogil:
+            result = self._handle.host_cache_stats()
+        return {
+            "hits": result.hits,
+            "misses": result.misses,
+            "evictions": result.evictions,
+            "storage_bytes": result.storage_bytes,
+            "h2d_bytes": result.h2d_bytes,
+        }
+
+    def clear_host_cache(self) -> None:
+        with nogil:
+            self._handle.clear_host_cache()
 
     def pread(self, buf, size: Optional[int], file_offset: int, task_size) -> IOFuture:
         cdef pair[uintptr_t, size_t] info = parse_buffer_argument(buf, size, True)

@@ -116,6 +116,10 @@ class defaults {
   std::size_t _task_size;
   std::size_t _gds_threshold;
   std::size_t _bounce_buffer_size;
+  bool _host_cache_enabled;
+  std::size_t _host_cache_capacity;
+  std::size_t _host_cache_line_size;
+  std::size_t _host_cache_max_io_size;
   std::size_t _http_max_attempts;
   long _http_timeout;
   std::vector<int> _http_status_codes;
@@ -306,6 +310,22 @@ class defaults {
    * @param nbytes The bounce buffer size in bytes.
    */
   static void set_bounce_buffer_size(std::size_t nbytes);
+
+  /** @brief Whether new FileHandles use the small-read host cache. */
+  [[nodiscard]] static bool host_cache_enabled();
+  static void set_host_cache_enabled(bool enabled);
+
+  /** @brief Pinned-host-memory capacity reserved lazily by each cached FileHandle. */
+  [[nodiscard]] static std::size_t host_cache_capacity();
+  static void set_host_cache_capacity(std::size_t nbytes);
+
+  /** @brief Cache-line size. Requests may not cross a cache-line boundary. */
+  [[nodiscard]] static std::size_t host_cache_line_size();
+  static void set_host_cache_line_size(std::size_t nbytes);
+
+  /** @brief Maximum individual read routed through the host cache. */
+  [[nodiscard]] static std::size_t host_cache_max_io_size();
+  static void set_host_cache_max_io_size(std::size_t nbytes);
 
   /**
    * @brief Get the maximum number of attempts per remote IO read.

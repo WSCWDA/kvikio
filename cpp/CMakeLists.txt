@@ -160,6 +160,7 @@ set(SOURCES
     "src/compat_mode.cpp"
     "src/compat_mode_manager.cpp"
     "src/http_status_codes.cpp"
+    "src/host_cache.cpp"
     "src/cufile/config.cpp"
     "src/cufile/driver.cpp"
     "src/defaults.cpp"

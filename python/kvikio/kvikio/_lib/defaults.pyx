@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # distutils: language = c++
@@ -31,6 +31,19 @@ cdef extern from "<kvikio/defaults.hpp>" namespace "kvikio" nogil:
     size_t cpp_bounce_buffer_size "kvikio::defaults::bounce_buffer_size"() except +
     void cpp_set_bounce_buffer_size \
         "kvikio::defaults::set_bounce_buffer_size"(size_t nbytes) except +
+    bool cpp_host_cache_enabled "kvikio::defaults::host_cache_enabled"() except +
+    void cpp_set_host_cache_enabled \
+        "kvikio::defaults::set_host_cache_enabled"(bool enabled) except +
+    size_t cpp_host_cache_capacity "kvikio::defaults::host_cache_capacity"() except +
+    void cpp_set_host_cache_capacity \
+        "kvikio::defaults::set_host_cache_capacity"(size_t nbytes) except +
+    size_t cpp_host_cache_line_size "kvikio::defaults::host_cache_line_size"() except +
+    void cpp_set_host_cache_line_size \
+        "kvikio::defaults::set_host_cache_line_size"(size_t nbytes) except +
+    size_t cpp_host_cache_max_io_size \
+        "kvikio::defaults::host_cache_max_io_size"() except +
+    void cpp_set_host_cache_max_io_size \
+        "kvikio::defaults::set_host_cache_max_io_size"(size_t nbytes) except +
     size_t cpp_http_max_attempts "kvikio::defaults::http_max_attempts"() except +
     void cpp_set_http_max_attempts \
         "kvikio::defaults::set_http_max_attempts"(size_t attempts) except +
@@ -117,6 +130,38 @@ def set_bounce_buffer_size(nbytes: int) -> None:
     cdef size_t cpp_nbytes = nbytes
     with nogil:
         cpp_set_bounce_buffer_size(cpp_nbytes)
+
+
+def host_cache_enabled() -> bool:
+    return cpp_host_cache_enabled()
+
+
+def set_host_cache_enabled(enabled: bool) -> None:
+    cpp_set_host_cache_enabled(enabled)
+
+
+def host_cache_capacity() -> int:
+    return cpp_host_cache_capacity()
+
+
+def set_host_cache_capacity(nbytes: int) -> None:
+    cpp_set_host_cache_capacity(nbytes)
+
+
+def host_cache_line_size() -> int:
+    return cpp_host_cache_line_size()
+
+
+def set_host_cache_line_size(nbytes: int) -> None:
+    cpp_set_host_cache_line_size(nbytes)
+
+
+def host_cache_max_io_size() -> int:
+    return cpp_host_cache_max_io_size()
+
+
+def set_host_cache_max_io_size(nbytes: int) -> None:
+    cpp_set_host_cache_max_io_size(nbytes)
 
 
 def http_max_attempts() -> int:

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2021-2025, NVIDIA CORPORATION. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2021-2026, NVIDIA CORPORATION. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 
@@ -53,6 +53,10 @@ class ConfigContextManager:
             "task_size",
             "gds_threshold",
             "bounce_buffer_size",
+            "host_cache_enabled",
+            "host_cache_capacity",
+            "host_cache_line_size",
+            "host_cache_max_io_size",
             "http_max_attempts",
             "http_status_codes",
             "http_timeout",
@@ -122,6 +126,10 @@ def set(*config) -> ConfigContextManager:
         - ``"task_size"``
         - ``"gds_threshold"``
         - ``"bounce_buffer_size"``
+        - ``"host_cache_enabled"``
+        - ``"host_cache_capacity"``
+        - ``"host_cache_line_size"``
+        - ``"host_cache_max_io_size"``
         - ``"http_max_attempts"``
         - ``"http_status_codes"``
         - ``"http_timeout"``
@@ -167,6 +175,10 @@ def get(config_name: str) -> Any:
         - ``"task_size"``
         - ``"gds_threshold"``
         - ``"bounce_buffer_size"``
+        - ``"host_cache_enabled"``
+        - ``"host_cache_capacity"``
+        - ``"host_cache_line_size"``
+        - ``"host_cache_max_io_size"``
         - ``"http_max_attempts"``
         - ``"http_status_codes"``
         - ``"http_timeout"``

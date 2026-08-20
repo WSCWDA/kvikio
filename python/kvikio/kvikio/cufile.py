@@ -106,6 +106,14 @@ class CuFile:
         """Get the flags of the file descriptor (see open(2))"""
         return self._handle.open_flags()
 
+    def host_cache_stats(self) -> dict[str, int]:
+        """Return hit, miss, eviction, storage-read and H2D byte counters."""
+        return self._handle.host_cache_stats()
+
+    def clear_host_cache(self) -> None:
+        """Drop cached lines for this file handle without resetting counters."""
+        self._handle.clear_host_cache()
+
     def __enter__(self) -> "CuFile":
         return self
 

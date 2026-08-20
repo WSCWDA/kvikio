@@ -22,6 +22,7 @@
 #include <kvikio/error.hpp>
 #include <kvikio/file_handle.hpp>
 #include <kvikio/file_utils.hpp>
+#include <kvikio/host_cache.hpp>
 #include <kvikio/logger.hpp>
 #include <kvikio/logger_macros.hpp>
 #include <kvikio/threadpool_wrapper.hpp>
@@ -100,6 +101,11 @@ FileHandle::FileHandle(std::string const& file_path,
 {
   KVIKIO_NVTX_FUNC_RANGE();
   _thread_pool = get_thread_pool_per_block_device(file_path);
+  if (defaults::host_cache_enabled()) {
+    _host_cache = std::make_unique<detail::HostCache>(defaults::host_cache_capacity(),
+                                                      defaults::host_cache_line_size(),
+                                                      defaults::host_cache_max_io_size());
+  }
 }
 
 FileHandle::FileHandle(FileHandle&& o) noexcept
@@ -109,7 +115,8 @@ FileHandle::FileHandle(FileHandle&& o) noexcept
     _nbytes{std::exchange(o._nbytes, 0)},
     _cufile_handle{std::exchange(o._cufile_handle, {})},
     _compat_mode_manager{std::move(o._compat_mode_manager)},
-    _thread_pool{std::exchange(o._thread_pool, {})}
+    _thread_pool{std::exchange(o._thread_pool, {})},
+    _host_cache{std::move(o._host_cache)}
 {
 }
 
@@ -122,6 +129,7 @@ FileHandle& FileHandle::operator=(FileHandle&& o) noexcept
   _cufile_handle       = std::exchange(o._cufile_handle, {});
   _compat_mode_manager = std::move(o._compat_mode_manager);
   _thread_pool         = std::exchange(o._thread_pool, {});
+  _host_cache          = std::move(o._host_cache);
   return *this;
 }
 
@@ -144,6 +152,7 @@ void FileHandle::close() noexcept
     _nbytes      = 0;
     _initialized = false;
     _thread_pool = nullptr;
+    _host_cache.reset();
   } catch (...) {
   }
 }
@@ -170,6 +179,16 @@ std::size_t FileHandle::nbytes() const
   return _nbytes;
 }
 
+HostCacheStats FileHandle::host_cache_stats() const noexcept
+{
+  return _host_cache ? _host_cache->stats() : HostCacheStats{};
+}
+
+void FileHandle::clear_host_cache() noexcept
+{
+  if (_host_cache) { _host_cache->clear(); }
+}
+
 std::size_t FileHandle::read(void* devPtr_base,
                              std::size_t size,
                              std::size_t file_offset,
@@ -177,6 +196,16 @@ std::size_t FileHandle::read(void* devPtr_base,
                              bool sync_default_stream)
 {
   KVIKIO_NVTX_FUNC_RANGE(size);
+  if (_host_cache && _host_cache->eligible(size, file_offset)) {
+    if (auto ret = _host_cache->read(_file_direct_off.fd(),
+                                     _file_direct_on.fd(),
+                                     devPtr_base,
+                                     size,
+                                     file_offset,
+                                     devPtr_offset)) {
+      return *ret;
+    }
+  }
   if (get_compat_mode_manager().is_compat_mode_preferred()) {
     return detail::posix_device_read(
       _file_direct_off.fd(), devPtr_base, size, file_offset, devPtr_offset, _file_direct_on.fd());
@@ -202,6 +231,7 @@ std::size_t FileHandle::write(void const* devPtr_base,
 {
   KVIKIO_NVTX_FUNC_RANGE(size);
   _nbytes = 0;  // Invalidate the computed file size
+  clear_host_cache();
 
   if (get_compat_mode_manager().is_compat_mode_preferred()) {
     return detail::posix_device_write(
@@ -269,6 +299,14 @@ std::future<std::size_t> FileHandle::pread(void* buf,
   }
 
   CUcontext ctx = get_context_from_pointer(buf);
+
+  if (_host_cache && _host_cache->eligible(size, file_offset)) {
+    PushAndPopContext c(ctx);
+    if (auto ret = _host_cache->read(
+          _file_direct_off.fd(), _file_direct_on.fd(), buf, size, file_offset, 0)) {
+      return make_ready_future(*ret);
+    }
+  }
 
   // Shortcut that circumvent the threadpool and use the POSIX backend directly.
   if (size < gds_threshold) {
@@ -338,6 +376,7 @@ std::future<std::size_t> FileHandle::pwrite(void const* buf,
     gds_threshold,
     sync_default_stream);
   KVIKIO_EXPECT(thread_pool != nullptr, "The thread pool must not be nullptr");
+  clear_host_cache();
 
   // Use the block-device-specific pool only if it exists and the user didn't explicitly provide a
   // custom pool
@@ -447,6 +486,7 @@ void FileHandle::write_async(void* devPtr_base,
                              CUstream stream)
 {
   KVIKIO_NVTX_FUNC_RANGE();
+  clear_host_cache();
   get_compat_mode_manager().validate_compat_mode_for_async();
   if (get_compat_mode_manager().is_compat_mode_preferred_for_async()) {
     KVIKIO_CUDA_DRIVER_TRY(cudaAPI::instance().StreamSynchronize(stream));

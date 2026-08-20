@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2021-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 #pragma once
@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cstdlib>
+#include <memory>
 
 #include <kvikio/buffer.hpp>
 #include <kvikio/compat_mode.hpp>
@@ -17,6 +18,7 @@
 #include <kvikio/defaults.hpp>
 #include <kvikio/error.hpp>
 #include <kvikio/file_utils.hpp>
+#include <kvikio/host_cache.hpp>
 #include <kvikio/shim/cufile.hpp>
 #include <kvikio/shim/cufile_h_wrapper.hpp>
 #include <kvikio/stream.hpp>
@@ -41,6 +43,7 @@ class FileHandle {
   CompatModeManager _compat_mode_manager;
   friend class CompatModeManager;
   ThreadPool* _thread_pool{};
+  std::unique_ptr<detail::HostCache> _host_cache{};
 
  public:
   // 644 is a common setting of Unix file permissions: read and write for owner, read-only for group
@@ -131,6 +134,12 @@ class FileHandle {
    * @return The number of bytes
    */
   [[nodiscard]] std::size_t nbytes() const;
+
+  /** @brief Return per-handle host-cache counters. */
+  [[nodiscard]] HostCacheStats host_cache_stats() const noexcept;
+
+  /** @brief Drop all cached lines for this handle without resetting counters. */
+  void clear_host_cache() noexcept;
 
   /**
    * @brief Reads specified bytes from the file into the device memory.

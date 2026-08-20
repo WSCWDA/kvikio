@@ -133,6 +133,30 @@ def test_bounce_buffer_size():
         kvikio.defaults.set("bounce_buffer_size", -1)
 
 
+def test_host_cache_settings():
+    """Host-cache settings are exposed through the regular defaults API."""
+    keys = [
+        "host_cache_enabled",
+        "host_cache_capacity",
+        "host_cache_line_size",
+        "host_cache_max_io_size",
+    ]
+    before = {key: kvikio.defaults.get(key) for key in keys}
+    with kvikio.defaults.set(
+        {
+            "host_cache_enabled": True,
+            "host_cache_capacity": 4 * 65536,
+            "host_cache_line_size": 65536,
+            "host_cache_max_io_size": 4096,
+        }
+    ):
+        assert kvikio.defaults.get("host_cache_enabled") is True
+        assert kvikio.defaults.get("host_cache_capacity") == 4 * 65536
+        assert kvikio.defaults.get("host_cache_line_size") == 65536
+        assert kvikio.defaults.get("host_cache_max_io_size") == 4096
+    assert {key: kvikio.defaults.get(key) for key in keys} == before
+
+
 def test_http_max_attempts():
     before = kvikio.defaults.get("http_max_attempts")
 

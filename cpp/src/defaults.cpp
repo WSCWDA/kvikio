@@ -113,6 +113,26 @@ defaults::defaults()
       env > 0, "KVIKIO_BOUNCE_BUFFER_SIZE has to be a positive integer", std::invalid_argument);
     _bounce_buffer_size = env;
   }
+  // Host cache is opt-in. The pinned allocation is made lazily on the first eligible read.
+  {
+    _host_cache_enabled = getenv_or("KVIKIO_HOST_CACHE", false);
+    ssize_t const capacity = getenv_or("KVIKIO_HOST_CACHE_CAPACITY", 1024 * 1024 * 1024);
+    ssize_t const line_size = getenv_or("KVIKIO_HOST_CACHE_LINE_SIZE", 64 * 1024);
+    ssize_t const max_io = getenv_or("KVIKIO_HOST_CACHE_MAX_IO_SIZE", 64 * 1024);
+    KVIKIO_EXPECT(capacity > 0, "KVIKIO_HOST_CACHE_CAPACITY must be positive", std::invalid_argument);
+    KVIKIO_EXPECT(line_size >= 4096 && (line_size & (line_size - 1)) == 0,
+                  "KVIKIO_HOST_CACHE_LINE_SIZE must be a power of two and at least 4096",
+                  std::invalid_argument);
+    KVIKIO_EXPECT(max_io > 0 && max_io <= line_size,
+                  "KVIKIO_HOST_CACHE_MAX_IO_SIZE must be in (0, line size]",
+                  std::invalid_argument);
+    KVIKIO_EXPECT(capacity >= line_size,
+                  "KVIKIO_HOST_CACHE_CAPACITY must hold at least one line",
+                  std::invalid_argument);
+    _host_cache_capacity    = capacity;
+    _host_cache_line_size   = line_size;
+    _host_cache_max_io_size = max_io;
+  }
   // Determine the default value of `http_max_attempts`
   {
     ssize_t const env = getenv_or("KVIKIO_HTTP_MAX_ATTEMPTS", 3);
@@ -211,6 +231,46 @@ void defaults::set_bounce_buffer_size(std::size_t nbytes)
   KVIKIO_EXPECT(
     nbytes > 0, "size of the bounce buffer must be a positive integer", std::invalid_argument);
   instance()->_bounce_buffer_size = nbytes;
+}
+
+bool defaults::host_cache_enabled() { return instance()->_host_cache_enabled; }
+
+void defaults::set_host_cache_enabled(bool enabled) { instance()->_host_cache_enabled = enabled; }
+
+std::size_t defaults::host_cache_capacity() { return instance()->_host_cache_capacity; }
+
+void defaults::set_host_cache_capacity(std::size_t nbytes)
+{
+  KVIKIO_EXPECT(nbytes >= host_cache_line_size(),
+                "host cache capacity must hold at least one line",
+                std::invalid_argument);
+  instance()->_host_cache_capacity = nbytes;
+}
+
+std::size_t defaults::host_cache_line_size() { return instance()->_host_cache_line_size; }
+
+void defaults::set_host_cache_line_size(std::size_t nbytes)
+{
+  KVIKIO_EXPECT(nbytes >= 4096 && (nbytes & (nbytes - 1)) == 0,
+                "host cache line size must be a power of two and at least 4096",
+                std::invalid_argument);
+  KVIKIO_EXPECT(nbytes <= host_cache_capacity(),
+                "host cache line size cannot exceed capacity",
+                std::invalid_argument);
+  KVIKIO_EXPECT(host_cache_max_io_size() <= nbytes,
+                "host cache line size cannot be smaller than max I/O size",
+                std::invalid_argument);
+  instance()->_host_cache_line_size = nbytes;
+}
+
+std::size_t defaults::host_cache_max_io_size() { return instance()->_host_cache_max_io_size; }
+
+void defaults::set_host_cache_max_io_size(std::size_t nbytes)
+{
+  KVIKIO_EXPECT(nbytes > 0 && nbytes <= host_cache_line_size(),
+                "host cache max I/O size must be in (0, line size]",
+                std::invalid_argument);
+  instance()->_host_cache_max_io_size = nbytes;
 }
 
 std::size_t defaults::http_max_attempts() { return instance()->_http_max_attempts; }
