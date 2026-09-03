@@ -83,4 +83,6 @@ if(KvikIO_REMOTE_SUPPORT)
   kvikio_add_test(NAME URL_TEST SOURCES test_url.cpp)
 endif()
 
+kvikio_add_test(NAME IO_CONTEXT_TEST SOURCES test_io_context.cpp)
+
 rapids_test_install_relocatable(INSTALL_COMPONENT_SET testing DESTINATION bin/tests/libkvikio)

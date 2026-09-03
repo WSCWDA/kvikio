@@ -19,6 +19,7 @@
 #include <kvikio/error.hpp>
 #include <kvikio/file_utils.hpp>
 #include <kvikio/host_cache.hpp>
+#include <kvikio/io_context.hpp>
 #include <kvikio/shim/cufile.hpp>
 #include <kvikio/shim/cufile_h_wrapper.hpp>
 #include <kvikio/stream.hpp>
@@ -43,7 +44,14 @@ class FileHandle {
   CompatModeManager _compat_mode_manager;
   friend class CompatModeManager;
   ThreadPool* _thread_pool{};
+  std::unique_ptr<IOContext> _io_context{};
   std::unique_ptr<detail::HostCache> _host_cache{};
+
+  std::size_t read_impl(void* devPtr_base,
+                        std::size_t size,
+                        std::size_t file_offset,
+                        std::size_t devPtr_offset,
+                        bool sync_default_stream);
 
  public:
   // 644 is a common setting of Unix file permissions: read and write for owner, read-only for group
@@ -134,6 +142,9 @@ class FileHandle {
    * @return The number of bytes
    */
   [[nodiscard]] std::size_t nbytes() const;
+
+  /** @brief Return the per-handle workload classification, policy, and profile. */
+  [[nodiscard]] IOContextSnapshot io_context_snapshot() const noexcept;
 
   /** @brief Return per-handle host-cache counters. */
   [[nodiscard]] HostCacheStats host_cache_stats() const noexcept;

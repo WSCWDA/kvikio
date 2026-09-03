@@ -101,7 +101,9 @@ FileHandle::FileHandle(std::string const& file_path,
 {
   KVIKIO_NVTX_FUNC_RANGE();
   _thread_pool = get_thread_pool_per_block_device(file_path);
-  if (defaults::host_cache_enabled()) {
+  auto const host_cache_enabled = defaults::host_cache_enabled();
+  _io_context                  = std::make_unique<IOContext>(host_cache_enabled);
+  if (host_cache_enabled) {
     _host_cache = std::make_unique<detail::HostCache>(defaults::host_cache_capacity(),
                                                       defaults::host_cache_line_size(),
                                                       defaults::host_cache_max_io_size());
@@ -116,6 +118,7 @@ FileHandle::FileHandle(FileHandle&& o) noexcept
     _cufile_handle{std::exchange(o._cufile_handle, {})},
     _compat_mode_manager{std::move(o._compat_mode_manager)},
     _thread_pool{std::exchange(o._thread_pool, {})},
+    _io_context{std::move(o._io_context)},
     _host_cache{std::move(o._host_cache)}
 {
 }
@@ -129,6 +132,7 @@ FileHandle& FileHandle::operator=(FileHandle&& o) noexcept
   _cufile_handle       = std::exchange(o._cufile_handle, {});
   _compat_mode_manager = std::move(o._compat_mode_manager);
   _thread_pool         = std::exchange(o._thread_pool, {});
+  _io_context          = std::move(o._io_context);
   _host_cache          = std::move(o._host_cache);
   return *this;
 }
@@ -152,6 +156,7 @@ void FileHandle::close() noexcept
     _nbytes      = 0;
     _initialized = false;
     _thread_pool = nullptr;
+    _io_context.reset();
     _host_cache.reset();
   } catch (...) {
   }
@@ -179,6 +184,11 @@ std::size_t FileHandle::nbytes() const
   return _nbytes;
 }
 
+IOContextSnapshot FileHandle::io_context_snapshot() const noexcept
+{
+  return _io_context ? _io_context->snapshot() : IOContextSnapshot{};
+}
+
 HostCacheStats FileHandle::host_cache_stats() const noexcept
 {
   return _host_cache ? _host_cache->stats() : HostCacheStats{};
@@ -196,7 +206,19 @@ std::size_t FileHandle::read(void* devPtr_base,
                              bool sync_default_stream)
 {
   KVIKIO_NVTX_FUNC_RANGE(size);
-  if (_host_cache && _host_cache->eligible(size, file_offset)) {
+  if (_io_context) { _io_context->observe(size, file_offset); }
+  return read_impl(devPtr_base, size, file_offset, devPtr_offset, sync_default_stream);
+}
+
+std::size_t FileHandle::read_impl(void* devPtr_base,
+                                  std::size_t size,
+                                  std::size_t file_offset,
+                                  std::size_t devPtr_offset,
+                                  bool sync_default_stream)
+{
+  auto const policy = _io_context ? _io_context->policy() : IOPolicy{};
+  if (policy.cache == CachePolicy::ADMIT && _host_cache &&
+      _host_cache->eligible(size, file_offset)) {
     if (auto ret = _host_cache->read(_file_direct_off.fd(),
                                      _file_direct_on.fd(),
                                      devPtr_base,
@@ -206,7 +228,8 @@ std::size_t FileHandle::read(void* devPtr_base,
       return *ret;
     }
   }
-  if (get_compat_mode_manager().is_compat_mode_preferred()) {
+  if (get_compat_mode_manager().is_compat_mode_preferred() ||
+      policy.path == IOPath::HOST_MEDIATED) {
     return detail::posix_device_read(
       _file_direct_off.fd(), devPtr_base, size, file_offset, devPtr_offset, _file_direct_on.fd());
   }
@@ -299,8 +322,11 @@ std::future<std::size_t> FileHandle::pread(void* buf,
   }
 
   CUcontext ctx = get_context_from_pointer(buf);
+  if (_io_context) { _io_context->observe(size, file_offset); }
+  auto const policy = _io_context ? _io_context->policy() : IOPolicy{};
 
-  if (_host_cache && _host_cache->eligible(size, file_offset)) {
+  if (policy.cache == CachePolicy::ADMIT && _host_cache &&
+      _host_cache->eligible(size, file_offset)) {
     PushAndPopContext c(ctx);
     if (auto ret = _host_cache->read(
           _file_direct_off.fd(), _file_direct_on.fd(), buf, size, file_offset, 0)) {
@@ -309,7 +335,7 @@ std::future<std::size_t> FileHandle::pread(void* buf,
   }
 
   // Shortcut that circumvent the threadpool and use the POSIX backend directly.
-  if (size < gds_threshold) {
+  if (size < gds_threshold && (!_io_context || !_io_context->profile_complete())) {
     PushAndPopContext c(ctx);
     auto bytes_read = detail::posix_device_read(
       _file_direct_off.fd(), buf, size, file_offset, 0, _file_direct_on.fd());
@@ -319,7 +345,8 @@ std::future<std::size_t> FileHandle::pread(void* buf,
   }
 
   // Let's synchronize once instead of in each task.
-  if (sync_default_stream && !get_compat_mode_manager().is_compat_mode_preferred()) {
+  if (sync_default_stream && !get_compat_mode_manager().is_compat_mode_preferred() &&
+      policy.path == IOPath::GPU_DIRECT) {
     PushAndPopContext c(ctx);
     KVIKIO_CUDA_DRIVER_TRY(cudaAPI::instance().StreamSynchronize(nullptr));
   }
@@ -330,7 +357,8 @@ std::future<std::size_t> FileHandle::pread(void* buf,
                           std::size_t file_offset,
                           std::size_t devPtr_offset) -> std::size_t {
     PushAndPopContext c(ctx);
-    return read(devPtr_base, size, file_offset, devPtr_offset, /* sync_default_stream = */ false);
+    return read_impl(
+      devPtr_base, size, file_offset, devPtr_offset, /* sync_default_stream = */ false);
   };
   auto [devPtr_base, base_size, devPtr_offset] = get_alloc_info(buf, &ctx);
 
@@ -338,8 +366,9 @@ std::future<std::size_t> FileHandle::pread(void* buf,
   // subsequent tasks start at a page-aligned file offset. This eliminates per-task unaligned
   // prefix handling in both the opportunistic DIO and the overread DIO paths.
   std::optional<std::size_t> first_task_size{};
-  if (get_compat_mode_manager().is_compat_mode_preferred() && _file_direct_on.fd() != -1 &&
-      defaults::auto_direct_io_read()) {
+  if ((get_compat_mode_manager().is_compat_mode_preferred() ||
+       policy.path == IOPath::HOST_MEDIATED) &&
+      _file_direct_on.fd() != -1 && defaults::auto_direct_io_read()) {
     auto const misalignment = file_offset - detail::align_down(file_offset, get_page_size());
     if (misalignment > 0 && misalignment < task_size) {
       first_task_size = task_size - misalignment;

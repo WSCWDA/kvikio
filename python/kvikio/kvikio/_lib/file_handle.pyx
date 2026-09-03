@@ -10,7 +10,7 @@ from typing import Optional, Union
 
 from posix cimport fcntl
 
-from libc.stdint cimport uint64_t, uintptr_t
+from libc.stdint cimport uint8_t, uint64_t, uintptr_t
 from libcpp cimport bool
 from libcpp.string cimport string
 from libcpp.utility cimport move, pair
@@ -33,6 +33,43 @@ cdef extern from "cuda.h":
 
 
 cdef extern from "<kvikio/file_handle.hpp>" namespace "kvikio" nogil:
+    cpdef enum class WorkloadClass(uint8_t):
+        UNKNOWN = 0
+        STREAMING = 1
+        REUSE_DOMINATED = 2
+        GENERAL = 3
+
+    cpdef enum class IOPath(uint8_t):
+        HOST_MEDIATED = 0
+        GPU_DIRECT = 1
+
+    cpdef enum class CachePolicy(uint8_t):
+        BYPASS = 0
+        ADMIT = 1
+
+    cpdef enum class SubmitPolicy(uint8_t):
+        DIRECT = 0
+        SHAPED = 1
+
+    cdef cppclass IOPolicy:
+        IOPath path
+        CachePolicy cache
+        SubmitPolicy submit
+
+    cdef cppclass RuntimeStats:
+        uint64_t request_count
+        uint64_t requested_bytes
+        uint64_t profiled_requests
+        double average_io_size
+        double sequential_ratio
+        double repeated_region_ratio
+        bool profile_complete
+
+    cdef cppclass IOContextSnapshot:
+        WorkloadClass workload
+        IOPolicy policy
+        RuntimeStats stats
+
     cdef cppclass HostCacheStats:
         uint64_t hits
         uint64_t misses
@@ -95,6 +132,7 @@ cdef extern from "<kvikio/file_handle.hpp>" namespace "kvikio" nogil:
             CUstream stream
         ) except +
         bool is_direct_io_supported()
+        IOContextSnapshot io_context_snapshot()
         HostCacheStats host_cache_stats()
         void clear_host_cache()
 
@@ -146,6 +184,36 @@ cdef class CuFile:
             "evictions": result.evictions,
             "storage_bytes": result.storage_bytes,
             "h2d_bytes": result.h2d_bytes,
+        }
+
+    def io_context(self) -> dict:
+        cdef IOContextSnapshot result
+        with nogil:
+            result = self._handle.io_context_snapshot()
+        return {
+            "workload": (
+                "STREAMING" if result.workload == WorkloadClass.STREAMING else
+                "REUSE_DOMINATED" if result.workload == WorkloadClass.REUSE_DOMINATED else
+                "GENERAL" if result.workload == WorkloadClass.GENERAL else
+                "UNKNOWN"
+            ),
+            "path": (
+                "HOST_MEDIATED" if result.policy.path == IOPath.HOST_MEDIATED else
+                "GPU_DIRECT"
+            ),
+            "cache": (
+                "ADMIT" if result.policy.cache == CachePolicy.ADMIT else "BYPASS"
+            ),
+            "submit": (
+                "SHAPED" if result.policy.submit == SubmitPolicy.SHAPED else "DIRECT"
+            ),
+            "request_count": result.stats.request_count,
+            "requested_bytes": result.stats.requested_bytes,
+            "profiled_requests": result.stats.profiled_requests,
+            "average_io_size": result.stats.average_io_size,
+            "sequential_ratio": result.stats.sequential_ratio,
+            "repeated_region_ratio": result.stats.repeated_region_ratio,
+            "profile_complete": result.stats.profile_complete,
         }
 
     def clear_host_cache(self) -> None:

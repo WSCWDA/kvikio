@@ -178,6 +178,33 @@ def test_raw_read_write(tmp_path, size):
         assert f.raw_read(a) == a.nbytes
 
 
+def test_io_context_repeated_reads(tmp_path):
+    """A repeated small-read context selects the host cache after profiling."""
+    filename = tmp_path / "test-file"
+    data = numpy.arange(16 * 1024, dtype=numpy.uint8)
+    data.tofile(filename)
+    out = cupy.empty(4096, dtype=cupy.uint8)
+
+    settings = {
+        "host_cache_enabled": True,
+        "host_cache_capacity": 1024 * 1024,
+        "host_cache_line_size": 64 * 1024,
+        "host_cache_max_io_size": 64 * 1024,
+    }
+    with kvikio.defaults.set(settings):
+        with kvikio.CuFile(filename, "r") as f:
+            for _ in range(64):
+                assert f.raw_read(out, size=4096, file_offset=0) == 4096
+            context = f.io_context()
+
+    assert context["profile_complete"]
+    assert context["request_count"] == 64
+    assert context["workload"] == "REUSE_DOMINATED"
+    assert context["path"] == "HOST_MEDIATED"
+    assert context["cache"] == "ADMIT"
+    assert context["submit"] == "DIRECT"
+
+
 def test_raw_read_write_of_host_memory(tmp_path):
     """Test raw read/write of host memory, which isn't supported"""
     filename = tmp_path / "test-file"

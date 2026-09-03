@@ -110,6 +110,10 @@ class CuFile:
         """Return hit, miss, eviction, storage-read and H2D byte counters."""
         return self._handle.host_cache_stats()
 
+    def io_context(self) -> dict:
+        """Return this file handle's workload profile and selected I/O policy."""
+        return self._handle.io_context()
+
     def clear_host_cache(self) -> None:
         """Drop cached lines for this file handle without resetting counters."""
         self._handle.clear_host_cache()
