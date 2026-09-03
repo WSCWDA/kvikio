@@ -61,6 +61,24 @@ print(f.host_cache_stats())
   `clear_host_cache()`，或关闭缓存。
 - 当前每个缓存句柄独占容量，首次合格读取时才分配页锁定内存。大量同时打开的文件应减小容量。
 
+## IOContext workload 分类
+
+每个 `FileHandle` 的 `IOContext` 使用前 64 个逻辑 GPU 读取请求统计平均 I/O 大小、顺序访问
+比例和重复区域比例，并生成一次长期复用的策略。分类标签描述主导性能特征，而不是把文件或
+应用强制归入互斥的静态类型：
+
+- `SEQUENTIAL_SCAN`：顺序比例不低于 75%，且平均 I/O 不小于 64 KiB；使用 GPU-direct，
+  绕过 Host Cache。
+- `REUSE_DOMINATED`：重复区域比例不低于 25%，且平均 I/O 不大于 64 KiB；使用
+  Host-mediated 路径，并在 HCache 可用时准入缓存。
+- `FINE_GRAINED`：不满足复用条件的平均小于 64 KiB 的请求；使用 Host-mediated 路径，
+  但不准入 HCache。
+- `GENERAL`：其余大粒度或混合请求；默认使用 GPU-direct，并绕过 HCache。
+
+文件大小没有作为 `SMALL_FILE` 或 `LARGE_FILE` 枚举值，因为它与访问顺序、请求粒度和复用
+特征相互独立。例如，大文件也可能只访问一个很小的热点区域。若后续需要利用文件大小，应将
+其作为独立的 `FileTraits` 输入，而不是加入 `WorkloadClass`。
+
 ## 如何确认 SSD 是否真的被缓存挡住
 
 先清理文件页缓存并观察块设备，而不是只看程序的 `storage_bytes`：

@@ -12,7 +12,7 @@ namespace {
 
 constexpr std::uint64_t streaming_ratio_percent = 75;
 constexpr std::uint64_t reuse_ratio_percent     = 25;
-constexpr std::size_t small_io_threshold        = 64 * 1024;
+constexpr std::size_t io_size_threshold         = 64 * 1024;
 
 std::uint64_t region_hash(std::size_t region) noexcept
 {
@@ -53,27 +53,30 @@ void IOContext::observe(std::size_t size, std::size_t file_offset) noexcept
 
 void IOContext::classify() noexcept
 {
-  auto const requests  = _profiled_requests.load(std::memory_order_acquire);
-  auto const bytes     = _profiled_bytes.load(std::memory_order_relaxed);
+  auto const requests   = _profiled_requests.load(std::memory_order_acquire);
+  auto const bytes      = _profiled_bytes.load(std::memory_order_relaxed);
   auto const sequential = _sequential_requests.load(std::memory_order_relaxed);
   auto const repeated   = _repeated_regions.load(std::memory_order_relaxed);
   if (requests == 0) { return; }
 
   auto const average_size = bytes / requests;
-  if (repeated * 100 >= requests * reuse_ratio_percent && average_size <= small_io_threshold) {
+  if (repeated * 100 >= requests * reuse_ratio_percent && average_size <= io_size_threshold) {
     _workload.store(WorkloadClass::REUSE_DOMINATED, std::memory_order_relaxed);
     _path.store(IOPath::HOST_MEDIATED, std::memory_order_relaxed);
     _cache.store(_host_cache_available ? CachePolicy::ADMIT : CachePolicy::BYPASS,
                  std::memory_order_relaxed);
   } else if (sequential * 100 >= requests * streaming_ratio_percent &&
-             average_size >= small_io_threshold) {
-    _workload.store(WorkloadClass::STREAMING, std::memory_order_relaxed);
+             average_size >= io_size_threshold) {
+    _workload.store(WorkloadClass::SEQUENTIAL_SCAN, std::memory_order_relaxed);
     _path.store(IOPath::GPU_DIRECT, std::memory_order_relaxed);
+    _cache.store(CachePolicy::BYPASS, std::memory_order_relaxed);
+  } else if (average_size < io_size_threshold) {
+    _workload.store(WorkloadClass::FINE_GRAINED, std::memory_order_relaxed);
+    _path.store(IOPath::HOST_MEDIATED, std::memory_order_relaxed);
     _cache.store(CachePolicy::BYPASS, std::memory_order_relaxed);
   } else {
     _workload.store(WorkloadClass::GENERAL, std::memory_order_relaxed);
-    _path.store(average_size < small_io_threshold ? IOPath::HOST_MEDIATED : IOPath::GPU_DIRECT,
-                std::memory_order_relaxed);
+    _path.store(IOPath::GPU_DIRECT, std::memory_order_relaxed);
     _cache.store(CachePolicy::BYPASS, std::memory_order_relaxed);
   }
   _profile_complete.store(true, std::memory_order_release);

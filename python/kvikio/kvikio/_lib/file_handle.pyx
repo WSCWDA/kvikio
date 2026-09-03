@@ -35,9 +35,10 @@ cdef extern from "cuda.h":
 cdef extern from "<kvikio/file_handle.hpp>" namespace "kvikio" nogil:
     cpdef enum class WorkloadClass(uint8_t):
         UNKNOWN = 0
-        STREAMING = 1
+        SEQUENTIAL_SCAN = 1
         REUSE_DOMINATED = 2
         GENERAL = 3
+        FINE_GRAINED = 4
 
     cpdef enum class IOPath(uint8_t):
         HOST_MEDIATED = 0
@@ -192,8 +193,9 @@ cdef class CuFile:
             result = self._handle.io_context_snapshot()
         return {
             "workload": (
-                "STREAMING" if result.workload == WorkloadClass.STREAMING else
+                "SEQUENTIAL_SCAN" if result.workload == WorkloadClass.SEQUENTIAL_SCAN else
                 "REUSE_DOMINATED" if result.workload == WorkloadClass.REUSE_DOMINATED else
+                "FINE_GRAINED" if result.workload == WorkloadClass.FINE_GRAINED else
                 "GENERAL" if result.workload == WorkloadClass.GENERAL else
                 "UNKNOWN"
             ),

@@ -11,7 +11,19 @@
 
 namespace kvikio {
 
-enum class WorkloadClass : std::uint8_t { UNKNOWN, STREAMING, REUSE_DOMINATED, GENERAL };
+/**
+ * @brief Dominant workload characteristic derived from a multi-dimensional profile.
+ *
+ * This is an explanatory label, not the source of truth for policy selection. File size is
+ * intentionally not a class because it is orthogonal to access order, request size, and reuse.
+ */
+enum class WorkloadClass : std::uint8_t {
+  UNKNOWN          = 0,
+  SEQUENTIAL_SCAN  = 1,
+  REUSE_DOMINATED  = 2,
+  GENERAL          = 3,
+  FINE_GRAINED     = 4
+};
 
 enum class IOPath : std::uint8_t { HOST_MEDIATED, GPU_DIRECT };
 

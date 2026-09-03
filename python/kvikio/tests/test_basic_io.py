@@ -205,6 +205,42 @@ def test_io_context_repeated_reads(tmp_path):
     assert context["submit"] == "DIRECT"
 
 
+@pytest.mark.parametrize(
+    "io_size,offsets,workload,path",
+    [
+        (
+            64 * 1024,
+            [i * 64 * 1024 for i in range(64)],
+            "SEQUENTIAL_SCAN",
+            "GPU_DIRECT",
+        ),
+        (
+            4096,
+            [i * 64 * 1024 for i in range(64)],
+            "FINE_GRAINED",
+            "HOST_MEDIATED",
+        ),
+    ],
+)
+def test_io_context_observable_classes(tmp_path, io_size, offsets, workload, path):
+    """Python reports the same dominant class and path selected by C++."""
+    filename = tmp_path / "test-file"
+    numpy.zeros(4 * 1024 * 1024, dtype=numpy.uint8).tofile(filename)
+    out = cupy.empty(io_size, dtype=cupy.uint8)
+
+    with kvikio.defaults.set("host_cache_enabled", False):
+        with kvikio.CuFile(filename, "r") as f:
+            for offset in offsets:
+                assert f.raw_read(out, size=io_size, file_offset=offset) == io_size
+            context = f.io_context()
+
+    assert context["profile_complete"]
+    assert context["workload"] == workload
+    assert context["path"] == path
+    assert context["cache"] == "BYPASS"
+    assert context["submit"] == "DIRECT"
+
+
 def test_raw_read_write_of_host_memory(tmp_path):
     """Test raw read/write of host memory, which isn't supported"""
     filename = tmp_path / "test-file"
