@@ -19,6 +19,8 @@ cudaAPI::cudaAPI()
   // the name of the symbol through cude.h.
   get_symbol(MemHostAlloc, lib, KVIKIO_STRINGIFY(cuMemHostAlloc));
   get_symbol(MemFreeHost, lib, KVIKIO_STRINGIFY(cuMemFreeHost));
+  get_symbol(MemAlloc, lib, KVIKIO_STRINGIFY(cuMemAlloc));
+  get_symbol(MemFree, lib, KVIKIO_STRINGIFY(cuMemFree));
   get_symbol(MemHostRegister, lib, KVIKIO_STRINGIFY(cuMemHostRegister));
   get_symbol(MemHostUnregister, lib, KVIKIO_STRINGIFY(cuMemHostUnregister));
   get_symbol(MemcpyHtoDAsync, lib, KVIKIO_STRINGIFY(cuMemcpyHtoDAsync));

@@ -37,6 +37,17 @@ struct IOPolicy {
   SubmitPolicy submit{SubmitPolicy::DIRECT};
 };
 
+struct ShapingConfig {
+  std::size_t alignment{4096};
+  std::size_t max_request_size{64 * 1024};
+  std::size_t max_merge_gap{4096};
+  std::size_t max_batch_bytes{256 * 1024};
+  std::size_t max_batch_requests{32};
+  std::uint64_t collection_window_us{20};
+  double min_mergeable_ratio{0.50};
+  double max_amplification{1.50};
+};
+
 struct RuntimeStats {
   std::uint64_t request_count{};
   std::uint64_t requested_bytes{};
@@ -44,6 +55,11 @@ struct RuntimeStats {
   double average_io_size{};
   double sequential_ratio{};
   double repeated_region_ratio{};
+  double file_offset_unaligned_ratio{};
+  double size_unaligned_ratio{};
+  double device_address_unaligned_ratio{};
+  double mergeable_ratio{};
+  double alignment_amplification{};
   bool profile_complete{};
 };
 
@@ -64,7 +80,9 @@ class IOContext {
  public:
   static constexpr std::uint64_t profile_request_limit = 64;
 
-  explicit IOContext(bool host_cache_available = false) noexcept;
+  explicit IOContext(bool host_cache_available      = false,
+                     bool request_shaping_available = false,
+                     ShapingConfig shaping_config   = {}) noexcept;
   IOContext(IOContext const&)            = delete;
   IOContext& operator=(IOContext const&) = delete;
   IOContext(IOContext&&)                 = delete;
@@ -72,6 +90,10 @@ class IOContext {
   ~IOContext()                           = default;
 
   void observe(std::size_t size, std::size_t file_offset) noexcept;
+  void observe(void const* dev_ptr_base,
+               std::size_t size,
+               std::size_t file_offset,
+               std::size_t dev_ptr_offset) noexcept;
   [[nodiscard]] IOPolicy policy() const noexcept;
   [[nodiscard]] WorkloadClass workload() const noexcept;
   [[nodiscard]] RuntimeStats stats() const noexcept;
@@ -80,18 +102,26 @@ class IOContext {
   void reset() noexcept;
 
  private:
-  static constexpr std::size_t region_size       = 64 * 1024;
+  static constexpr std::size_t region_size       = 4 * 1024;
   static constexpr std::size_t region_filter_len = 4;
 
   void classify() noexcept;
 
   bool _host_cache_available{};
+  bool _request_shaping_available{};
+  ShapingConfig _shaping_config{};
   std::atomic<std::uint64_t> _request_count{};
   std::atomic<std::uint64_t> _requested_bytes{};
   std::atomic<std::uint64_t> _profiled_requests{};
   std::atomic<std::uint64_t> _profiled_bytes{};
   std::atomic<std::uint64_t> _sequential_requests{};
   std::atomic<std::uint64_t> _repeated_regions{};
+  std::atomic<std::uint64_t> _file_offset_unaligned{};
+  std::atomic<std::uint64_t> _size_unaligned{};
+  std::atomic<std::uint64_t> _device_address_unaligned{};
+  std::atomic<std::uint64_t> _mergeable_requests{};
+  std::atomic<std::uint64_t> _aligned_physical_bytes{};
+  std::atomic<std::size_t> _last_request_begin{};
   std::atomic<std::size_t> _last_request_end{};
   std::array<std::atomic<std::uint64_t>, region_filter_len> _seen_regions{};
   std::atomic<WorkloadClass> _workload{WorkloadClass::UNKNOWN};

@@ -34,6 +34,10 @@ cdef extern from "<kvikio/defaults.hpp>" namespace "kvikio" nogil:
     bool cpp_host_cache_enabled "kvikio::defaults::host_cache_enabled"() except +
     void cpp_set_host_cache_enabled \
         "kvikio::defaults::set_host_cache_enabled"(bool enabled) except +
+    bool cpp_request_shaping_enabled \
+        "kvikio::defaults::request_shaping_enabled"() except +
+    void cpp_set_request_shaping_enabled \
+        "kvikio::defaults::set_request_shaping_enabled"(bool enabled) except +
     size_t cpp_host_cache_capacity "kvikio::defaults::host_cache_capacity"() except +
     void cpp_set_host_cache_capacity \
         "kvikio::defaults::set_host_cache_capacity"(size_t nbytes) except +
@@ -138,6 +142,14 @@ def host_cache_enabled() -> bool:
 
 def set_host_cache_enabled(enabled: bool) -> None:
     cpp_set_host_cache_enabled(enabled)
+
+
+def request_shaping_enabled() -> bool:
+    return cpp_request_shaping_enabled()
+
+
+def set_request_shaping_enabled(enabled: bool) -> None:
+    cpp_set_request_shaping_enabled(enabled)
 
 
 def host_cache_capacity() -> int:

@@ -157,6 +157,13 @@ def test_host_cache_settings():
     assert {key: kvikio.defaults.get(key) for key in keys} == before
 
 
+def test_request_shaping_setting():
+    before = kvikio.defaults.get("request_shaping_enabled")
+    with kvikio.defaults.set("request_shaping_enabled", True):
+        assert kvikio.defaults.get("request_shaping_enabled") is True
+    assert kvikio.defaults.get("request_shaping_enabled") is before
+
+
 def test_http_max_attempts():
     before = kvikio.defaults.get("http_max_attempts")
 

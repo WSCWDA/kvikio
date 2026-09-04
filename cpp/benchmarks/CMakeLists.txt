@@ -60,3 +60,6 @@ function(kvikio_add_benchmark)
 endfunction()
 
 kvikio_add_benchmark(NAME THREADPOOL_BENCHMARK SOURCES "threadpool/threadpool_benchmark.cpp")
+
+kvikio_add_benchmark(NAME REQUEST_SHAPER_BENCHMARK
+                     SOURCES "request_shaper/request_shaper_benchmark.cpp")

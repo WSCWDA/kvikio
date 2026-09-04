@@ -162,6 +162,7 @@ set(SOURCES
     "src/http_status_codes.cpp"
     "src/host_cache.cpp"
     "src/io_context.cpp"
+    "src/request_shaper.cpp"
     "src/cufile/config.cpp"
     "src/cufile/driver.cpp"
     "src/defaults.cpp"

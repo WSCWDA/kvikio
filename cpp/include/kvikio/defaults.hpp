@@ -117,6 +117,7 @@ class defaults {
   std::size_t _gds_threshold;
   std::size_t _bounce_buffer_size;
   bool _host_cache_enabled;
+  bool _request_shaping_enabled;
   std::size_t _host_cache_capacity;
   std::size_t _host_cache_line_size;
   std::size_t _host_cache_max_io_size;
@@ -314,6 +315,10 @@ class defaults {
   /** @brief Whether new FileHandles use the small-read host cache. */
   [[nodiscard]] static bool host_cache_enabled();
   static void set_host_cache_enabled(bool enabled);
+
+  /** @brief Whether new FileHandles may coalesce fine-grained device reads. */
+  [[nodiscard]] static bool request_shaping_enabled();
+  static void set_request_shaping_enabled(bool enabled);
 
   /** @brief Pinned-host-memory capacity reserved lazily by each cached FileHandle. */
   [[nodiscard]] static std::size_t host_cache_capacity();

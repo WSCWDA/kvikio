@@ -133,6 +133,10 @@ defaults::defaults()
     _host_cache_line_size   = line_size;
     _host_cache_max_io_size = max_io;
   }
+  // Request shaping is experimental and opt-in.
+  {
+    _request_shaping_enabled = getenv_or("KVIKIO_REQUEST_SHAPING", false);
+  }
   // Determine the default value of `http_max_attempts`
   {
     ssize_t const env = getenv_or("KVIKIO_HTTP_MAX_ATTEMPTS", 3);
@@ -236,6 +240,13 @@ void defaults::set_bounce_buffer_size(std::size_t nbytes)
 bool defaults::host_cache_enabled() { return instance()->_host_cache_enabled; }
 
 void defaults::set_host_cache_enabled(bool enabled) { instance()->_host_cache_enabled = enabled; }
+
+bool defaults::request_shaping_enabled() { return instance()->_request_shaping_enabled; }
+
+void defaults::set_request_shaping_enabled(bool enabled)
+{
+  instance()->_request_shaping_enabled = enabled;
+}
 
 std::size_t defaults::host_cache_capacity() { return instance()->_host_cache_capacity; }
 

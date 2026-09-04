@@ -100,9 +100,13 @@ FileHandle::FileHandle(std::string const& file_path,
   : _initialized{true}, _compat_mode_manager{file_path, flags, mode, compat_mode, this}
 {
   KVIKIO_NVTX_FUNC_RANGE();
-  _thread_pool = get_thread_pool_per_block_device(file_path);
-  auto const host_cache_enabled = defaults::host_cache_enabled();
-  _io_context                  = std::make_unique<IOContext>(host_cache_enabled);
+  _thread_pool                       = get_thread_pool_per_block_device(file_path);
+  auto const host_cache_enabled      = defaults::host_cache_enabled();
+  auto const request_shaping_enabled = defaults::request_shaping_enabled();
+  _io_context = std::make_unique<IOContext>(host_cache_enabled, request_shaping_enabled);
+  if (request_shaping_enabled) {
+    _request_shaper = std::make_unique<detail::RequestShaper>(_thread_pool);
+  }
   if (host_cache_enabled) {
     _host_cache = std::make_unique<detail::HostCache>(defaults::host_cache_capacity(),
                                                       defaults::host_cache_line_size(),
@@ -119,6 +123,7 @@ FileHandle::FileHandle(FileHandle&& o) noexcept
     _compat_mode_manager{std::move(o._compat_mode_manager)},
     _thread_pool{std::exchange(o._thread_pool, {})},
     _io_context{std::move(o._io_context)},
+    _request_shaper{std::move(o._request_shaper)},
     _host_cache{std::move(o._host_cache)}
 {
 }
@@ -133,6 +138,7 @@ FileHandle& FileHandle::operator=(FileHandle&& o) noexcept
   _compat_mode_manager = std::move(o._compat_mode_manager);
   _thread_pool         = std::exchange(o._thread_pool, {});
   _io_context          = std::move(o._io_context);
+  _request_shaper      = std::move(o._request_shaper);
   _host_cache          = std::move(o._host_cache);
   return *this;
 }
@@ -150,6 +156,10 @@ void FileHandle::close() noexcept
   KVIKIO_NVTX_FUNC_RANGE();
   try {
     if (closed()) { return; }
+    if (_request_shaper) {
+      _request_shaper->close();
+      _request_shaper.reset();
+    }
     _cufile_handle.unregister_handle();
     _file_direct_off.close();
     _file_direct_on.close();
@@ -189,6 +199,11 @@ IOContextSnapshot FileHandle::io_context_snapshot() const noexcept
   return _io_context ? _io_context->snapshot() : IOContextSnapshot{};
 }
 
+RequestShaperStats FileHandle::request_shaper_stats() const noexcept
+{
+  return _request_shaper ? _request_shaper->stats() : RequestShaperStats{};
+}
+
 HostCacheStats FileHandle::host_cache_stats() const noexcept
 {
   return _host_cache ? _host_cache->stats() : HostCacheStats{};
@@ -206,7 +221,7 @@ std::size_t FileHandle::read(void* devPtr_base,
                              bool sync_default_stream)
 {
   KVIKIO_NVTX_FUNC_RANGE(size);
-  if (_io_context) { _io_context->observe(size, file_offset); }
+  if (_io_context) { _io_context->observe(devPtr_base, size, file_offset, devPtr_offset); }
   return read_impl(devPtr_base, size, file_offset, devPtr_offset, sync_default_stream);
 }
 
@@ -322,7 +337,7 @@ std::future<std::size_t> FileHandle::pread(void* buf,
   }
 
   CUcontext ctx = get_context_from_pointer(buf);
-  if (_io_context) { _io_context->observe(size, file_offset); }
+  if (_io_context) { _io_context->observe(buf, size, file_offset, 0); }
   auto const policy = _io_context ? _io_context->policy() : IOPolicy{};
 
   if (policy.cache == CachePolicy::ADMIT && _host_cache &&
@@ -344,6 +359,20 @@ std::future<std::size_t> FileHandle::pread(void* buf,
     return make_ready_future(bytes_read);
   }
 
+  auto [devPtr_base, base_size, devPtr_offset] = get_alloc_info(buf, &ctx);
+
+  if (policy.path == IOPath::GPU_DIRECT && policy.submit == SubmitPolicy::SHAPED &&
+      _request_shaper && !get_compat_mode_manager().is_compat_mode_preferred()) {
+    return _request_shaper->submit(_cufile_handle.handle(),
+                                   devPtr_base,
+                                   size,
+                                   file_offset,
+                                   devPtr_offset,
+                                   nbytes(),
+                                   ctx,
+                                   sync_default_stream);
+  }
+
   // Let's synchronize once instead of in each task.
   if (sync_default_stream && !get_compat_mode_manager().is_compat_mode_preferred() &&
       policy.path == IOPath::GPU_DIRECT) {
@@ -360,8 +389,6 @@ std::future<std::size_t> FileHandle::pread(void* buf,
     return read_impl(
       devPtr_base, size, file_offset, devPtr_offset, /* sync_default_stream = */ false);
   };
-  auto [devPtr_base, base_size, devPtr_offset] = get_alloc_info(buf, &ctx);
-
   // When using the POSIX path (compat mode) with Direct I/O, shorten the first task so that
   // subsequent tasks start at a page-aligned file offset. This eliminates per-task unaligned
   // prefix handling in both the opportunistic DIO and the overread DIO paths.

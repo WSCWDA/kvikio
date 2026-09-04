@@ -20,6 +20,7 @@
 #include <kvikio/file_utils.hpp>
 #include <kvikio/host_cache.hpp>
 #include <kvikio/io_context.hpp>
+#include <kvikio/request_shaper.hpp>
 #include <kvikio/shim/cufile.hpp>
 #include <kvikio/shim/cufile_h_wrapper.hpp>
 #include <kvikio/stream.hpp>
@@ -45,6 +46,7 @@ class FileHandle {
   friend class CompatModeManager;
   ThreadPool* _thread_pool{};
   std::unique_ptr<IOContext> _io_context{};
+  std::unique_ptr<detail::RequestShaper> _request_shaper{};
   std::unique_ptr<detail::HostCache> _host_cache{};
 
   std::size_t read_impl(void* devPtr_base,
@@ -145,6 +147,9 @@ class FileHandle {
 
   /** @brief Return the per-handle workload classification, policy, and profile. */
   [[nodiscard]] IOContextSnapshot io_context_snapshot() const noexcept;
+
+  /** @brief Return per-handle request-shaping execution counters. */
+  [[nodiscard]] RequestShaperStats request_shaper_stats() const noexcept;
 
   /** @brief Return per-handle host-cache counters. */
   [[nodiscard]] HostCacheStats host_cache_stats() const noexcept;

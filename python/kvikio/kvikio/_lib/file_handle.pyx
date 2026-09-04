@@ -64,6 +64,11 @@ cdef extern from "<kvikio/file_handle.hpp>" namespace "kvikio" nogil:
         double average_io_size
         double sequential_ratio
         double repeated_region_ratio
+        double file_offset_unaligned_ratio
+        double size_unaligned_ratio
+        double device_address_unaligned_ratio
+        double mergeable_ratio
+        double alignment_amplification
         bool profile_complete
 
     cdef cppclass IOContextSnapshot:
@@ -77,6 +82,14 @@ cdef extern from "<kvikio/file_handle.hpp>" namespace "kvikio" nogil:
         uint64_t evictions
         uint64_t storage_bytes
         uint64_t h2d_bytes
+
+    cdef cppclass RequestShaperStats:
+        uint64_t logical_requests
+        uint64_t physical_requests
+        uint64_t logical_bytes
+        uint64_t submitted_bytes
+        uint64_t shaped_groups
+        uint64_t direct_fallbacks
 
     cdef cppclass FileHandle:
         FileHandle() except +
@@ -134,6 +147,7 @@ cdef extern from "<kvikio/file_handle.hpp>" namespace "kvikio" nogil:
         ) except +
         bool is_direct_io_supported()
         IOContextSnapshot io_context_snapshot()
+        RequestShaperStats request_shaper_stats()
         HostCacheStats host_cache_stats()
         void clear_host_cache()
 
@@ -189,8 +203,10 @@ cdef class CuFile:
 
     def io_context(self) -> dict:
         cdef IOContextSnapshot result
+        cdef RequestShaperStats shaping
         with nogil:
             result = self._handle.io_context_snapshot()
+            shaping = self._handle.request_shaper_stats()
         return {
             "workload": (
                 "SEQUENTIAL_SCAN" if result.workload == WorkloadClass.SEQUENTIAL_SCAN else
@@ -215,7 +231,20 @@ cdef class CuFile:
             "average_io_size": result.stats.average_io_size,
             "sequential_ratio": result.stats.sequential_ratio,
             "repeated_region_ratio": result.stats.repeated_region_ratio,
+            "file_offset_unaligned_ratio": result.stats.file_offset_unaligned_ratio,
+            "size_unaligned_ratio": result.stats.size_unaligned_ratio,
+            "device_address_unaligned_ratio": result.stats.device_address_unaligned_ratio,
+            "mergeable_ratio": result.stats.mergeable_ratio,
+            "alignment_amplification": result.stats.alignment_amplification,
             "profile_complete": result.stats.profile_complete,
+            "shaping": {
+                "logical_requests": shaping.logical_requests,
+                "physical_requests": shaping.physical_requests,
+                "logical_bytes": shaping.logical_bytes,
+                "submitted_bytes": shaping.submitted_bytes,
+                "shaped_groups": shaping.shaped_groups,
+                "direct_fallbacks": shaping.direct_fallbacks,
+            },
         }
 
     def clear_host_cache(self) -> None:

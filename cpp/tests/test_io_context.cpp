@@ -69,6 +69,24 @@ TEST(IOContextTest, general_large_random_reads_select_gds)
   EXPECT_EQ(snapshot.policy.cache, kvikio::CachePolicy::BYPASS);
 }
 
+TEST(IOContextTest, adjacent_fine_grained_reads_select_shaped_gds)
+{
+  kvikio::IOContext context{/* host_cache_available = */ false,
+                            /* request_shaping_available = */ true};
+  constexpr std::size_t size = 4 * 1024;
+  for (std::size_t i = 0; i < kvikio::IOContext::profile_request_limit; ++i) {
+    context.observe(reinterpret_cast<void const*>(0x100000), size, 3 + i * size, 0);
+  }
+
+  auto const snapshot = context.snapshot();
+  EXPECT_EQ(snapshot.workload, kvikio::WorkloadClass::FINE_GRAINED);
+  EXPECT_EQ(snapshot.policy.path, kvikio::IOPath::GPU_DIRECT);
+  EXPECT_EQ(snapshot.policy.submit, kvikio::SubmitPolicy::SHAPED);
+  EXPECT_GT(snapshot.stats.file_offset_unaligned_ratio, 0.99);
+  EXPECT_GT(snapshot.stats.mergeable_ratio, 0.95);
+  EXPECT_GT(snapshot.stats.alignment_amplification, 1.0);
+}
+
 TEST(IOContextTest, policy_is_stable_after_profile)
 {
   kvikio::IOContext context{false};
