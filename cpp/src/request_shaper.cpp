@@ -149,12 +149,29 @@ class RequestShaper::Impl {
     CUfileHandle_t file_handle{};
     LogicalRead request{};
     bool sync_default_stream{};
+    std::chrono::steady_clock::time_point submitted_at{};
     std::promise<std::size_t> completion{};
   };
 
+  struct StagingSlot {
+    CUdeviceptr staging{};
+    CUstream stream{};
+    CUevent event{};
+    CUcontext context{};
+    bool registered{};
+    bool in_use{};
+  };
+
   Impl(ThreadPool* thread_pool, ShapingConfig config)
-    : thread_pool{thread_pool}, config{config}, planner{config}
-  { KVIKIO_EXPECT(thread_pool != nullptr, "request shaper thread pool must not be nullptr"); }
+    : thread_pool{thread_pool},
+      config{config},
+      planner{config},
+      staging_slots(config.staging_buffer_pool_size)
+  {
+    KVIKIO_EXPECT(thread_pool != nullptr, "request shaper thread pool must not be nullptr");
+    KVIKIO_EXPECT(config.staging_buffer_pool_size > 0,
+                  "request shaper staging buffer pool must not be empty");
+  }
 
   ~Impl() noexcept
   {
@@ -188,15 +205,15 @@ class RequestShaper::Impl {
                                     .file_size      = file_size,
                                     .context        = context};
     pending->sync_default_stream = sync_default_stream;
+    pending->submitted_at        = std::chrono::steady_clock::now();
     auto future                  = pending->completion.get_future();
     {
       std::lock_guard lock{mutex};
       KVIKIO_EXPECT(!closing, "cannot submit to a closed request shaper");
       pending_reads.push_back(std::move(pending));
-      pending_bytes += size;
-      if (!worker_active) {
-        worker_active = true;
-        worker        = thread_pool->submit_task([this] { drain(); });
+      if (!collector_active) {
+        collector_active = true;
+        collector        = thread_pool->submit_task([this] { drain(); });
       }
     }
     condition.notify_all();
@@ -207,171 +224,356 @@ class RequestShaper::Impl {
   {
     {
       std::lock_guard lock{mutex};
-      if (closing && !worker.valid()) {
-        release_staging();
-        return;
-      }
+      if (closed) { return; }
       closing = true;
     }
     condition.notify_all();
-    if (worker.valid()) { worker.get(); }
-    release_staging();
+    if (collector.valid()) { collector.get(); }
+    {
+      std::unique_lock lock{mutex};
+      condition.wait(lock, [this] {
+        return !collector_active && pending_reads.empty() && inflight_physical == 0;
+      });
+      closed = true;
+    }
+    release_staging_pool();
   }
 
   RequestShaperStats get_stats() const noexcept
   {
-    return {.logical_requests  = logical_requests.load(std::memory_order_relaxed),
-            .physical_requests = physical_requests.load(std::memory_order_relaxed),
-            .logical_bytes     = logical_bytes.load(std::memory_order_relaxed),
-            .submitted_bytes   = submitted_bytes.load(std::memory_order_relaxed),
-            .shaped_groups     = shaped_groups.load(std::memory_order_relaxed),
-            .direct_fallbacks  = direct_fallbacks.load(std::memory_order_relaxed)};
+    return {.logical_requests       = logical_requests.load(std::memory_order_relaxed),
+            .physical_requests      = physical_requests.load(std::memory_order_relaxed),
+            .logical_bytes          = logical_bytes.load(std::memory_order_relaxed),
+            .submitted_bytes        = submitted_bytes.load(std::memory_order_relaxed),
+            .shaped_groups          = shaped_groups.load(std::memory_order_relaxed),
+            .direct_fallbacks       = direct_fallbacks.load(std::memory_order_relaxed),
+            .collection_batches     = collection_batches.load(std::memory_order_relaxed),
+            .max_collected_requests = max_collected_requests.load(std::memory_order_relaxed),
+            .max_inflight_physical  = max_inflight_physical.load(std::memory_order_relaxed)};
   }
 
  private:
+  static void update_max(std::atomic<std::uint64_t>& maximum, std::uint64_t value) noexcept
+  {
+    auto previous = maximum.load(std::memory_order_relaxed);
+    while (previous < value &&
+           !maximum.compare_exchange_weak(
+             previous, value, std::memory_order_relaxed, std::memory_order_relaxed)) {
+    }
+  }
+
   void drain() noexcept
   {
     while (true) {
       std::vector<std::shared_ptr<PendingRead>> batch;
       {
         std::unique_lock lock{mutex};
-        condition.wait_for(lock, std::chrono::microseconds{config.collection_window_us}, [this] {
-          return closing || pending_reads.size() >= config.max_batch_requests ||
-                 pending_bytes >= config.max_batch_bytes;
-        });
-        batch.swap(pending_reads);
-        pending_bytes = 0;
-        if (batch.empty()) {
-          worker_active = false;
+        if (pending_reads.empty()) {
+          collector_active = false;
           condition.notify_all();
           return;
         }
+        auto const deadline = pending_reads.front()->submitted_at +
+                              std::chrono::microseconds{config.collection_window_us};
+        condition.wait_until(lock, deadline, [this] {
+          return closing || pending_reads.size() >= config.max_batch_requests;
+        });
+        auto const count = std::min(pending_reads.size(), config.max_batch_requests);
+        batch.reserve(count);
+        for (std::size_t i = 0; i < count; ++i) {
+          batch.push_back(std::move(pending_reads[i]));
+        }
+        pending_reads.erase(pending_reads.begin(), pending_reads.begin() + count);
       }
-      process(batch);
-      std::lock_guard lock{mutex};
-      if (pending_reads.empty()) {
-        worker_active = false;
-        condition.notify_all();
-        return;
-      }
+      dispatch(std::move(batch));
     }
   }
 
-  void process(std::vector<std::shared_ptr<PendingRead>>& batch) noexcept
+  static void set_exception(std::shared_ptr<PendingRead> const& pending,
+                            std::exception_ptr const& error) noexcept
   {
+    try {
+      pending->completion.set_exception(error);
+    } catch (...) {
+    }
+  }
+
+  void fail_plan(std::vector<std::shared_ptr<PendingRead>> const& batch,
+                 PhysicalReadPlan const& plan,
+                 std::exception_ptr const& error) noexcept
+  {
+    for (auto const& slice : plan.slices) {
+      set_exception(batch.at(slice.logical_id), error);
+    }
+  }
+
+  void dispatch(std::vector<std::shared_ptr<PendingRead>> batch) noexcept
+  {
+    collection_batches.fetch_add(1, std::memory_order_relaxed);
+    update_max(max_collected_requests, batch.size());
+
+    // Preserve KvikIO's default-stream ordering once per collected batch, rather than once per
+    // physical plan. The post-read D2D path is completed independently with CUDA events.
+    try {
+      std::vector<CUcontext> synchronized_contexts;
+      for (auto const& pending : batch) {
+        if (!pending->sync_default_stream ||
+            std::find(synchronized_contexts.begin(), synchronized_contexts.end(),
+                      pending->request.context) != synchronized_contexts.end()) {
+          continue;
+        }
+        PushAndPopContext context_guard{pending->request.context};
+        KVIKIO_CUDA_DRIVER_TRY(cudaAPI::instance().StreamSynchronize(nullptr));
+        synchronized_contexts.push_back(pending->request.context);
+      }
+    } catch (...) {
+      auto const error = std::current_exception();
+      for (auto const& pending : batch) {
+        set_exception(pending, error);
+      }
+      return;
+    }
+
     std::vector<LogicalRead> requests;
     requests.reserve(batch.size());
     for (std::size_t i = 0; i < batch.size(); ++i) {
       batch[i]->request.id = i;
       requests.push_back(batch[i]->request);
     }
-    auto const plans = planner.plan(requests);
-    for (auto const& plan : plans) {
+    std::vector<PhysicalReadPlan> plans;
+    try {
+      plans = planner.plan(requests);
+    } catch (...) {
+      auto const error = std::current_exception();
+      for (auto const& pending : batch) {
+        set_exception(pending, error);
+      }
+      return;
+    }
+
+    auto shared_batch =
+      std::make_shared<std::vector<std::shared_ptr<PendingRead>>>(std::move(batch));
+    for (auto& plan : plans) {
+      auto shared_plan = std::make_shared<PhysicalReadPlan>(std::move(plan));
+      task_started();
       try {
-        auto const context = requests.at(plan.slices.front().logical_id).context;
-        PushAndPopContext context_guard{context};
-        bool sync_default_stream = false;
-        for (auto const& slice : plan.slices) {
-          sync_default_stream =
-            sync_default_stream || batch.at(slice.logical_id)->sync_default_stream;
-        }
-        if (sync_default_stream) {
-          KVIKIO_CUDA_DRIVER_TRY(cudaAPI::instance().StreamSynchronize(nullptr));
-        }
-        if (plan.shaped) {
-          ensure_staging(context);
-          auto const handle = batch.at(plan.slices.front().logical_id)->file_handle;
-          auto const ret    = cuFileAPI::instance().Read(handle,
-                                                         reinterpret_cast<void*>(staging),
-                                                         plan.size,
-                                                         convert_size2off(plan.file_offset),
-                                                         0);
-          KVIKIO_CUFILE_CHECK_BYTES_DONE(ret);
-          KVIKIO_EXPECT(static_cast<std::size_t>(ret) == plan.size,
-                        "short physical read while executing shaped request");
-          for (auto const& slice : plan.slices) {
-            KVIKIO_CUDA_DRIVER_TRY(cudaAPI::cuda_memcpy_async(
-              convert_void2deviceptr(slice.destination_base) + slice.destination_offset,
-              staging + slice.staging_offset,
-              slice.size,
-              stream));
-          }
-          KVIKIO_CUDA_DRIVER_TRY(cudaAPI::instance().StreamSynchronize(stream));
-          for (auto const& slice : plan.slices) {
-            batch.at(slice.logical_id)->completion.set_value(slice.size);
-          }
-          shaped_groups.fetch_add(1, std::memory_order_relaxed);
-        } else {
-          auto const& slice = plan.slices.front();
-          auto const handle = batch.at(slice.logical_id)->file_handle;
-          auto const ret = cuFileAPI::instance().Read(handle,
-                                                      slice.destination_base,
-                                                      slice.size,
-                                                      convert_size2off(plan.file_offset),
-                                                      convert_size2off(slice.destination_offset));
-          KVIKIO_CUFILE_CHECK_BYTES_DONE(ret);
-          batch.at(slice.logical_id)->completion.set_value(static_cast<std::size_t>(ret));
-          direct_fallbacks.fetch_add(1, std::memory_order_relaxed);
-        }
-        logical_requests.fetch_add(plan.slices.size(), std::memory_order_relaxed);
-        physical_requests.fetch_add(1, std::memory_order_relaxed);
-        logical_bytes.fetch_add(plan.logical_bytes, std::memory_order_relaxed);
-        submitted_bytes.fetch_add(plan.size, std::memory_order_relaxed);
+        [[maybe_unused]] auto execution = thread_pool->submit_task(
+          [this, shared_batch, shared_plan] { execute(shared_batch, shared_plan); });
       } catch (...) {
-        auto const error = std::current_exception();
-        for (auto const& slice : plan.slices) {
-          try {
-            batch.at(slice.logical_id)->completion.set_exception(error);
-          } catch (...) {
-          }
-        }
+        fail_plan(*shared_batch, *shared_plan, std::current_exception());
+        task_finished();
       }
     }
   }
 
-  void ensure_staging(CUcontext context)
+  void task_started() noexcept
   {
-    if (staging != 0 && staging_context == context) { return; }
-    release_staging();
-    staging_context = context;
-    PushAndPopContext context_guard{context};
-    KVIKIO_CUDA_DRIVER_TRY(cudaAPI::instance().MemAlloc(&staging, config.max_batch_bytes));
-    bool registered = false;
+    std::lock_guard lock{mutex};
+    ++inflight_physical;
+  }
+
+  void task_finished() noexcept
+  {
+    {
+      std::lock_guard lock{mutex};
+      --inflight_physical;
+    }
+    condition.notify_all();
+  }
+
+  void physical_io_started() noexcept
+  {
+    auto const active = active_physical.fetch_add(1, std::memory_order_relaxed) + 1;
+    update_max(max_inflight_physical, active);
+  }
+
+  void physical_io_finished() noexcept
+  {
+    active_physical.fetch_sub(1, std::memory_order_relaxed);
+  }
+
+  void execute(std::shared_ptr<std::vector<std::shared_ptr<PendingRead>>> const& batch,
+               std::shared_ptr<PhysicalReadPlan> const& plan) noexcept
+  {
     try {
-      KVIKIO_CUFILE_TRY(cuFileAPI::instance().BufRegister(
-        reinterpret_cast<void*>(staging), config.max_batch_bytes, 0));
-      registered = true;
-      KVIKIO_CUDA_DRIVER_TRY(cudaAPI::instance().StreamCreate(&stream, CU_STREAM_NON_BLOCKING));
-    } catch (...) {
-      if (registered) {
+      auto const context = batch->at(plan->slices.front().logical_id)->request.context;
+      PushAndPopContext context_guard{context};
+      if (plan->shaped) {
+        auto* slot = acquire_staging(context);
         try {
-          cuFileAPI::instance().BufDeregister(reinterpret_cast<void*>(staging));
+          auto const handle = batch->at(plan->slices.front().logical_id)->file_handle;
+          physical_io_started();
+          ssize_t ret{};
+          try {
+            ret = cuFileAPI::instance().Read(handle,
+                                             reinterpret_cast<void*>(slot->staging),
+                                             plan->size,
+                                             convert_size2off(plan->file_offset),
+                                             0);
+          } catch (...) {
+            physical_io_finished();
+            throw;
+          }
+          physical_io_finished();
+          KVIKIO_CUFILE_CHECK_BYTES_DONE(ret);
+          KVIKIO_EXPECT(static_cast<std::size_t>(ret) == plan->size,
+                        "short physical read while executing shaped request");
+          for (auto const& slice : plan->slices) {
+            KVIKIO_CUDA_DRIVER_TRY(cudaAPI::cuda_memcpy_async(
+              convert_void2deviceptr(slice.destination_base) + slice.destination_offset,
+              slot->staging + slice.staging_offset,
+              slice.size,
+              slot->stream));
+          }
+          KVIKIO_CUDA_DRIVER_TRY(cudaAPI::instance().EventRecord(slot->event, slot->stream));
+          KVIKIO_CUDA_DRIVER_TRY(cudaAPI::instance().EventSynchronize(slot->event));
         } catch (...) {
+          release_staging(slot);
+          throw;
         }
+        release_staging(slot);
+        for (auto const& slice : plan->slices) {
+          batch->at(slice.logical_id)->completion.set_value(slice.size);
+        }
+        shaped_groups.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        auto const& slice = plan->slices.front();
+        auto const handle = batch->at(slice.logical_id)->file_handle;
+        physical_io_started();
+        ssize_t ret{};
+        try {
+          ret = cuFileAPI::instance().Read(handle,
+                                           slice.destination_base,
+                                           slice.size,
+                                           convert_size2off(plan->file_offset),
+                                           convert_size2off(slice.destination_offset));
+        } catch (...) {
+          physical_io_finished();
+          throw;
+        }
+        physical_io_finished();
+        KVIKIO_CUFILE_CHECK_BYTES_DONE(ret);
+        batch->at(slice.logical_id)->completion.set_value(static_cast<std::size_t>(ret));
+        direct_fallbacks.fetch_add(1, std::memory_order_relaxed);
       }
-      cudaAPI::instance().MemFree(staging);
-      staging         = 0;
-      staging_context = nullptr;
+      logical_requests.fetch_add(plan->slices.size(), std::memory_order_relaxed);
+      physical_requests.fetch_add(1, std::memory_order_relaxed);
+      logical_bytes.fetch_add(plan->logical_bytes, std::memory_order_relaxed);
+      submitted_bytes.fetch_add(plan->size, std::memory_order_relaxed);
+    } catch (...) {
+      fail_plan(*batch, *plan, std::current_exception());
+    }
+    task_finished();
+  }
+
+  StagingSlot* acquire_staging(CUcontext context)
+  {
+    StagingSlot* selected{};
+    {
+      std::unique_lock lock{staging_mutex};
+      staging_condition.wait(lock, [this] {
+        return std::any_of(staging_slots.begin(), staging_slots.end(),
+                           [](auto const& slot) { return !slot.in_use; });
+      });
+      auto matching =
+        std::find_if(staging_slots.begin(), staging_slots.end(), [context](auto const& slot) {
+          return !slot.in_use && slot.staging != 0 && slot.context == context;
+        });
+      if (matching == staging_slots.end()) {
+        matching = std::find_if(staging_slots.begin(), staging_slots.end(),
+                                [](auto const& slot) {
+                                  return !slot.in_use && slot.staging == 0;
+                                });
+      }
+      if (matching == staging_slots.end()) {
+        matching = std::find_if(staging_slots.begin(), staging_slots.end(),
+                                [](auto const& slot) { return !slot.in_use; });
+      }
+      matching->in_use = true;
+      selected         = &*matching;
+    }
+    try {
+      prepare_staging(*selected, context);
+    } catch (...) {
+      release_staging(selected);
+      throw;
+    }
+    return selected;
+  }
+
+  void release_staging(StagingSlot* slot) noexcept
+  {
+    {
+      std::lock_guard lock{staging_mutex};
+      slot->in_use = false;
+    }
+    staging_condition.notify_one();
+  }
+
+  void prepare_staging(StagingSlot& slot, CUcontext context)
+  {
+    if (slot.staging != 0 && slot.context == context) { return; }
+    destroy_staging(slot);
+    slot.context = context;
+    PushAndPopContext context_guard{context};
+    try {
+      KVIKIO_CUDA_DRIVER_TRY(cudaAPI::instance().MemAlloc(&slot.staging, config.max_batch_bytes));
+      KVIKIO_CUFILE_TRY(cuFileAPI::instance().BufRegister(
+        reinterpret_cast<void*>(slot.staging), config.max_batch_bytes, 0));
+      slot.registered = true;
+      KVIKIO_CUDA_DRIVER_TRY(
+        cudaAPI::instance().StreamCreate(&slot.stream, CU_STREAM_NON_BLOCKING));
+      KVIKIO_CUDA_DRIVER_TRY(
+        cudaAPI::instance().EventCreate(&slot.event, CU_EVENT_DISABLE_TIMING));
+    } catch (...) {
+      destroy_staging(slot);
       throw;
     }
   }
 
-  void release_staging() noexcept
+  void destroy_staging(StagingSlot& slot) noexcept
   {
-    if (staging == 0) { return; }
+    if (slot.context == nullptr) { return; }
     try {
-      PushAndPopContext context_guard{staging_context};
-      if (stream != nullptr) {
-        cudaAPI::instance().StreamSynchronize(stream);
-        cudaAPI::instance().StreamDestroy(stream);
+      PushAndPopContext context_guard{slot.context};
+      if (slot.event != nullptr) {
+        try {
+          cudaAPI::instance().EventDestroy(slot.event);
+        } catch (...) {
+        }
       }
-      cuFileAPI::instance().BufDeregister(reinterpret_cast<void*>(staging));
-      cudaAPI::instance().MemFree(staging);
+      if (slot.stream != nullptr) {
+        try {
+          cudaAPI::instance().StreamDestroy(slot.stream);
+        } catch (...) {
+        }
+      }
+      if (slot.registered) {
+        try {
+          cuFileAPI::instance().BufDeregister(reinterpret_cast<void*>(slot.staging));
+        } catch (...) {
+        }
+      }
+      if (slot.staging != 0) {
+        try {
+          cudaAPI::instance().MemFree(slot.staging);
+        } catch (...) {
+        }
+      }
     } catch (...) {
     }
-    staging         = 0;
-    stream          = nullptr;
-    staging_context = nullptr;
+    slot.staging    = 0;
+    slot.stream     = nullptr;
+    slot.event      = nullptr;
+    slot.context    = nullptr;
+    slot.registered = false;
+  }
+
+  void release_staging_pool() noexcept
+  {
+    for (auto& slot : staging_slots) {
+      destroy_staging(slot);
+    }
   }
 
   ThreadPool* thread_pool;
@@ -380,14 +582,15 @@ class RequestShaper::Impl {
   mutable std::mutex mutex;
   std::condition_variable condition;
   std::vector<std::shared_ptr<PendingRead>> pending_reads;
-  std::size_t pending_bytes{};
-  bool worker_active{};
+  std::size_t inflight_physical{};
+  bool collector_active{};
   bool closing{};
-  std::future<void> worker;
+  bool closed{};
+  std::future<void> collector;
 
-  CUdeviceptr staging{};
-  CUstream stream{};
-  CUcontext staging_context{};
+  std::mutex staging_mutex;
+  std::condition_variable staging_condition;
+  std::vector<StagingSlot> staging_slots;
 
   std::atomic<std::uint64_t> logical_requests{};
   std::atomic<std::uint64_t> physical_requests{};
@@ -395,6 +598,10 @@ class RequestShaper::Impl {
   std::atomic<std::uint64_t> submitted_bytes{};
   std::atomic<std::uint64_t> shaped_groups{};
   std::atomic<std::uint64_t> direct_fallbacks{};
+  std::atomic<std::uint64_t> collection_batches{};
+  std::atomic<std::uint64_t> max_collected_requests{};
+  std::atomic<std::uint64_t> active_physical{};
+  std::atomic<std::uint64_t> max_inflight_physical{};
 };
 
 RequestShaper::RequestShaper(ThreadPool* thread_pool, ShapingConfig config)

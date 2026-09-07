@@ -90,6 +90,9 @@ cdef extern from "<kvikio/file_handle.hpp>" namespace "kvikio" nogil:
         uint64_t submitted_bytes
         uint64_t shaped_groups
         uint64_t direct_fallbacks
+        uint64_t collection_batches
+        uint64_t max_collected_requests
+        uint64_t max_inflight_physical
 
     cdef cppclass FileHandle:
         FileHandle() except +
@@ -244,6 +247,9 @@ cdef class CuFile:
                 "submitted_bytes": shaping.submitted_bytes,
                 "shaped_groups": shaping.shaped_groups,
                 "direct_fallbacks": shaping.direct_fallbacks,
+                "collection_batches": shaping.collection_batches,
+                "max_collected_requests": shaping.max_collected_requests,
+                "max_inflight_physical": shaping.max_inflight_physical,
             },
         }
 

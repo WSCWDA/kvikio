@@ -86,3 +86,47 @@ TEST(RequestPlannerTest, keeps_large_pattern4_style_reads_direct)
   EXPECT_FALSE(plans[0].shaped);
   EXPECT_FALSE(plans[1].shaped);
 }
+
+TEST(RequestPlannerTest, merges_a_full_thirty_two_request_burst)
+{
+  kvikio::detail::RequestPlanner planner;
+  std::vector<kvikio::detail::LogicalRead> requests;
+  for (std::size_t i = 0; i < 32; ++i) {
+    requests.push_back(request(i, 3 + i * 4096, 4096));
+  }
+
+  auto const plans = planner.plan(requests);
+  ASSERT_EQ(plans.size(), 1);
+  EXPECT_TRUE(plans[0].shaped);
+  EXPECT_EQ(plans[0].file_offset, 0);
+  EXPECT_EQ(plans[0].size, 33 * 4096);
+  EXPECT_EQ(plans[0].logical_bytes, 32 * 4096);
+  EXPECT_EQ(plans[0].slices.size(), 32);
+}
+
+TEST(RequestPlannerTest, concurrency_defaults_cover_a_python_submission_burst)
+{
+  kvikio::ShapingConfig config;
+  EXPECT_EQ(config.max_batch_requests, 32);
+  EXPECT_EQ(config.staging_buffer_pool_size, 4);
+  EXPECT_EQ(config.collection_window_us, 200);
+}
+
+TEST(RequestPlannerTest, emits_four_independent_plans_for_pool_evaluation)
+{
+  kvikio::detail::RequestPlanner planner;
+  std::vector<kvikio::detail::LogicalRead> requests;
+  for (std::size_t cluster = 0; cluster < 4; ++cluster) {
+    for (std::size_t i = 0; i < 8; ++i) {
+      auto const id = cluster * 8 + i;
+      requests.push_back(request(id, 3 + cluster * 64 * 1024 + i * 4096, 4096));
+    }
+  }
+
+  auto const plans = planner.plan(requests);
+  ASSERT_EQ(plans.size(), 4);
+  for (auto const& plan : plans) {
+    EXPECT_TRUE(plan.shaped);
+    EXPECT_EQ(plan.slices.size(), 8);
+  }
+}

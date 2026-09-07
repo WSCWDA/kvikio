@@ -43,7 +43,8 @@ struct ShapingConfig {
   std::size_t max_merge_gap{4096};
   std::size_t max_batch_bytes{256 * 1024};
   std::size_t max_batch_requests{32};
-  std::uint64_t collection_window_us{20};
+  std::size_t staging_buffer_pool_size{4};
+  std::uint64_t collection_window_us{200};
   double min_mergeable_ratio{0.50};
   double max_amplification{1.50};
 };

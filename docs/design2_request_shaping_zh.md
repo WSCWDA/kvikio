@@ -6,13 +6,15 @@ Design 2 只对满足以下条件的设备读取启用：`IOContext` 已完成 6
 
 ## 机制
 
-每个 `FileHandle` 拥有一个短窗口请求队列。队列按照文件偏移排序，将重叠或间隔不超过
-4 KiB 的请求组成候选组。只有候选组包含至少两个请求、对齐后的物理范围不超过 256 KiB、
-不会越过文件末尾，并且 `physical_bytes / logical_bytes <= 1.5` 时才整形。
+每个 `FileHandle` 拥有一个短窗口请求队列。收集器等待队列达到 32 个请求，或者首个请求
+等待 200 微秒后形成批次。队列按照文件偏移排序，将重叠或间隔不超过 4 KiB 的请求组成
+候选组。只有候选组包含至少两个请求、对齐后的物理范围不超过 256 KiB、不会越过文件
+末尾，并且 `physical_bytes / logical_bytes <= 1.5` 时才整形。
 
-整形请求读取到一个延迟分配、长期注册的 GPU staging buffer，再通过同一内部 CUDA Stream
-执行 D2D 分发。`std::future` 只在对应 D2D 完成后完成。不能获益的请求继续逐请求调用
-`cuFileRead`。
+整形器维护 4 个延迟分配、长期注册的 GPU staging buffer slot。每个物理 plan 作为独立任务
+提交到 KvikIO 的设备级线程池，因此不同 plan 可以并行执行。每个 slot 拥有独立 CUDA Stream
+和 Event；D2D 分发后记录 Event，并在 Event 完成后兑现逻辑请求的 `std::future`，不再对整个
+Stream 调用 `cuStreamSynchronize`。不能获益的请求仍作为独立物理任务提交。
 
 设置 `KVIKIO_REQUEST_SHAPING=1` 或：
 
@@ -38,6 +40,24 @@ python -m kvikio.benchmarks.design2_request_shaping \
   --output /tmp/design2-results.json
 ```
 
+上面每批形成一个合并 plan，用于比较端到端收益。下面每批构造 4 个相距 64 KiB 的连续
+请求簇，预期形成 4 个可并发的物理 plan，用于验证 staging pool：
+
+```bash
+python -m kvikio.benchmarks.design2_request_shaping \
+  --file /mnt/gds2/cwd_test/design2-96m.bin \
+  --prepare \
+  --requests 8192 \
+  --io-size 4096 \
+  --batch-size 32 \
+  --clusters-per-batch 4 \
+  --verify \
+  --output /tmp/design2-pool-results.json
+```
+
+在设备线程池至少有 4 个线程时，pool 场景应观察到 `max_inflight_physical > 1`；否则说明
+物理 plan 虽已独立提交，但实际执行仍被设备或线程配置串行化。
+
 运行前应确认：
 
 ```bash
@@ -51,11 +71,15 @@ Benchmark 输出以下关键指标：
 - `context.shaping.logical_requests`：进入整形器的逻辑请求数；
 - `context.shaping.physical_requests`：实际调用 cuFile 的请求数；
 - `context.shaping.shaped_groups`：成功合并的请求组数；
+- `context.shaping.collection_batches`：计时阶段形成的收集批次数；
+- `context.shaping.max_collected_requests`：单批实际收集到的最大请求数；
+- `context.shaping.max_inflight_physical`：同时执行的 cuFile 物理调用峰值；
 - `context.shaping.submitted_bytes / logical_bytes`：Runtime 可见的提交放大率。
 
 机制生效至少需要同时满足：`submit == SHAPED`、`shaped_groups > 0` 且
 `physical_requests < logical_requests`。性能有效还要求 Shaped 的 IOPS 或逻辑带宽高于 Direct；
-若只有请求数下降而性能没有提高，说明 20 微秒收集窗口或 D2D 分发成本抵消了收益。
+若只有请求数下降而性能没有提高，说明物理 I/O、Event 等待或 D2D 分发成本仍抵消了收益。
+Benchmark 的 `context.shaping` 是计时前后差值，`context.shaping_total` 保留包含画像请求的累计值。
 
 测试完成后关闭统计：
 

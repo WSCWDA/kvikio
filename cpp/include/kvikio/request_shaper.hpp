@@ -25,6 +25,9 @@ struct RequestShaperStats {
   std::uint64_t submitted_bytes{};
   std::uint64_t shaped_groups{};
   std::uint64_t direct_fallbacks{};
+  std::uint64_t collection_batches{};
+  std::uint64_t max_collected_requests{};
+  std::uint64_t max_inflight_physical{};
 };
 
 namespace detail {
@@ -68,10 +71,10 @@ class RequestPlanner {
 /**
  * @brief Per-file deferred executor for fine-grained device reads.
  *
- * Logical reads are collected for a bounded interval. Mergeable file ranges are read once into a
- * persistent registered GPU staging buffer and scattered to the original destinations using D2D
- * copies. Completion of each returned future means that its destination contains the requested
- * bytes.
+ * Logical reads are collected until either 32 requests arrive or a bounded interval expires.
+ * Mergeable file ranges are dispatched concurrently through KvikIO's device thread pool, read
+ * into a pool of persistent registered GPU staging buffers, and scattered to the original
+ * destinations using D2D copies. CUDA events guard buffer reuse and logical completion.
  */
 class RequestShaper {
  public:

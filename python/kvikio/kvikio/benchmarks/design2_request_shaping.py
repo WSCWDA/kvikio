@@ -27,6 +27,55 @@ PROFILE_REQUESTS = 64
 MEASURE_BASE = 8 * MIB + 3
 
 
+def layout(
+    requests: int,
+    io_size: int,
+    batch_size: int,
+    clusters_per_batch: int,
+) -> tuple[int, int]:
+    requests_per_cluster = batch_size // clusters_per_batch
+    cluster_stride = max(64 * KIB, requests_per_cluster * io_size + 4096)
+    waves = (requests + batch_size - 1) // batch_size
+    return cluster_stride, waves
+
+
+def measured_offsets(
+    wave_begin: int,
+    wave_count: int,
+    io_size: int,
+    batch_size: int,
+    clusters_per_batch: int,
+) -> list[int]:
+    requests_per_cluster = batch_size // clusters_per_batch
+    cluster_stride, _ = layout(
+        wave_count, io_size, batch_size, clusters_per_batch
+    )
+    wave = wave_begin // batch_size
+    wave_stride = clusters_per_batch * cluster_stride
+    return [
+        MEASURE_BASE
+        + wave * wave_stride
+        + (i // requests_per_cluster) * cluster_stride
+        + (i % requests_per_cluster) * io_size
+        for i in range(wave_count)
+    ]
+
+
+def required_file_size(
+    requests: int,
+    io_size: int,
+    batch_size: int,
+    clusters_per_batch: int,
+) -> int:
+    cluster_stride, waves = layout(
+        requests, io_size, batch_size, clusters_per_batch
+    )
+    return max(
+        MEASURE_BASE + waves * clusters_per_batch * cluster_stride + 8192,
+        16 * MIB,
+    )
+
+
 def prepare_file(path: Path, size: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o644)
@@ -100,11 +149,14 @@ def run_mode(
     requests: int,
     io_size: int,
     batch_size: int,
+    clusters_per_batch: int,
     verify_data: bool,
 ) -> dict:
     buffers = [cupy.empty(io_size, dtype=cupy.uint8) for _ in range(batch_size)]
     large_buffer = cupy.empty(64 * KIB, dtype=cupy.uint8)
-    total_span = max(MEASURE_BASE + io_size * requests + 4096, 4 * MIB + 4096)
+    total_span = required_file_size(
+        requests, io_size, batch_size, clusters_per_batch
+    )
 
     with kvikio.defaults.set(
         {
@@ -129,6 +181,7 @@ def run_mode(
             }[mode]
             if (selected["path"], selected["submit"]) != expected:
                 raise RuntimeError(f"unexpected {mode} policy: {selected}")
+            shaping_before = selected["shaping"].copy()
 
             evict_file_cache(path)
             cupy.cuda.runtime.deviceSynchronize()
@@ -138,9 +191,13 @@ def run_mode(
             last_offsets = []
             for wave_begin in range(0, requests, batch_size):
                 wave_count = min(batch_size, requests - wave_begin)
-                offsets = [
-                    MEASURE_BASE + (wave_begin + i) * io_size for i in range(wave_count)
-                ]
+                offsets = measured_offsets(
+                    wave_begin,
+                    wave_count,
+                    io_size,
+                    batch_size,
+                    clusters_per_batch,
+                )
                 futures = [
                     handle.pread(buffers[i], io_size, offsets[i], task_size=io_size)
                     for i in range(wave_count)
@@ -153,12 +210,32 @@ def run_mode(
             if verify_data:
                 verify(path, last_buffers, last_offsets, io_size)
             context = handle.io_context()
+            shaping_total = context["shaping"]
+            cumulative = {
+                "logical_requests",
+                "physical_requests",
+                "logical_bytes",
+                "submitted_bytes",
+                "shaped_groups",
+                "direct_fallbacks",
+                "collection_batches",
+            }
+            context["shaping_total"] = shaping_total
+            context["shaping"] = {
+                key: (
+                    value - shaping_before.get(key, 0)
+                    if key in cumulative
+                    else value
+                )
+                for key, value in shaping_total.items()
+            }
 
     return {
         "mode": mode,
         "requests": requests,
         "io_size": io_size,
         "batch_size": batch_size,
+        "clusters_per_batch": clusters_per_batch,
         "completed_bytes": completed,
         "elapsed_seconds": elapsed,
         "iops": requests / elapsed,
@@ -173,18 +250,39 @@ def main() -> None:
     parser.add_argument("--requests", type=int, default=8192)
     parser.add_argument("--io-size", type=int, default=4096)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--clusters-per-batch", type=int, default=1)
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
-    required_size = max(MEASURE_BASE + args.requests * args.io_size + 8192, 16 * MIB)
+    if args.requests < 1 or args.io_size < 1 or args.batch_size < 1:
+        parser.error("--requests, --io-size, and --batch-size must be positive")
+    if (
+        args.clusters_per_batch < 1
+        or args.clusters_per_batch > args.batch_size
+        or args.batch_size % args.clusters_per_batch != 0
+    ):
+        parser.error("--clusters-per-batch must evenly divide --batch-size")
+
+    required_size = required_file_size(
+        args.requests,
+        args.io_size,
+        args.batch_size,
+        args.clusters_per_batch,
+    )
     if args.prepare:
         prepare_file(args.file, required_size)
 
     results = [
         run_mode(
-            args.file, mode, args.requests, args.io_size, args.batch_size, args.verify
+            args.file,
+            mode,
+            args.requests,
+            args.io_size,
+            args.batch_size,
+            args.clusters_per_batch,
+            args.verify,
         )
         for mode in ("direct", "host", "shaped")
     ]
@@ -210,6 +308,11 @@ def main() -> None:
                 0.0
                 if shaping["logical_bytes"] == 0
                 else shaping["submitted_bytes"] / shaping["logical_bytes"]
+            ),
+            "logical_requests_per_physical": (
+                0.0
+                if shaping["physical_requests"] == 0
+                else shaping["logical_requests"] / shaping["physical_requests"]
             ),
         },
     }
