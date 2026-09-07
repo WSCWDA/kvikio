@@ -23,6 +23,7 @@ TEST(IOContextTest, sequential_scan_reads_select_gds)
   EXPECT_EQ(snapshot.policy.path, kvikio::IOPath::GPU_DIRECT);
   EXPECT_EQ(snapshot.policy.cache, kvikio::CachePolicy::BYPASS);
   EXPECT_EQ(snapshot.policy.submit, kvikio::SubmitPolicy::DIRECT);
+  EXPECT_DOUBLE_EQ(snapshot.stats.repeated_region_ratio, 0.0);
 }
 
 TEST(IOContextTest, repeated_small_reads_select_host_cache)

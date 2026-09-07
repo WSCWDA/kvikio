@@ -102,8 +102,8 @@ class IOContext {
   void reset() noexcept;
 
  private:
-  static constexpr std::size_t region_size       = 4 * 1024;
-  static constexpr std::size_t region_filter_len = 4;
+  static constexpr std::size_t region_size      = 4 * 1024;
+  static constexpr std::size_t region_table_len = profile_request_limit;
 
   void classify() noexcept;
 
@@ -123,7 +123,7 @@ class IOContext {
   std::atomic<std::uint64_t> _aligned_physical_bytes{};
   std::atomic<std::size_t> _last_request_begin{};
   std::atomic<std::size_t> _last_request_end{};
-  std::array<std::atomic<std::uint64_t>, region_filter_len> _seen_regions{};
+  std::array<std::atomic<std::uint64_t>, region_table_len> _seen_regions{};
   std::atomic<WorkloadClass> _workload{WorkloadClass::UNKNOWN};
   std::atomic<IOPath> _path{IOPath::GPU_DIRECT};
   std::atomic<CachePolicy> _cache{CachePolicy::BYPASS};

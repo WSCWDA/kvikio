@@ -15,11 +15,6 @@ constexpr std::uint64_t streaming_ratio_percent = 75;
 constexpr std::uint64_t reuse_ratio_percent     = 25;
 constexpr std::size_t io_size_threshold         = 64 * 1024;
 
-std::uint64_t region_hash(std::size_t region) noexcept
-{
-  return static_cast<std::uint64_t>(region) * 11400714819323198485ull;
-}
-
 }  // namespace
 
 IOContext::IOContext(bool host_cache_available,
@@ -78,11 +73,29 @@ void IOContext::observe(void const* dev_ptr_base,
     request_end % alignment == 0 ? request_end : request_end + alignment - request_end % alignment;
   _aligned_physical_bytes.fetch_add(aligned_end - aligned_begin, std::memory_order_relaxed);
 
-  auto const hash       = region_hash(file_offset / region_size);
-  auto const word_index = static_cast<std::size_t>((hash >> 6) % region_filter_len);
-  auto const mask       = std::uint64_t{1} << (hash & 63);
-  auto const previous   = _seen_regions[word_index].fetch_or(mask, std::memory_order_relaxed);
-  if ((previous & mask) != 0) { _repeated_regions.fetch_add(1, std::memory_order_relaxed); }
+  // The profiling window contains at most 64 requests, so an exact fixed-size table is both
+  // bounded and cheap. A compact bitmap is not suitable here: regular strides alias its low
+  // hash bits and can make a cold sequential scan look reuse-dominated.
+  auto const region       = static_cast<std::uint64_t>(file_offset / region_size);
+  bool repeated_region    = false;
+  auto constexpr empty    = std::numeric_limits<std::uint64_t>::max();
+  for (auto& entry : _seen_regions) {
+    auto value = entry.load(std::memory_order_relaxed);
+    if (value == region) {
+      repeated_region = true;
+      break;
+    }
+    if (value == empty &&
+        entry.compare_exchange_strong(
+          value, region, std::memory_order_relaxed, std::memory_order_relaxed)) {
+      break;
+    }
+    if (value == region) {
+      repeated_region = true;
+      break;
+    }
+  }
+  if (repeated_region) { _repeated_regions.fetch_add(1, std::memory_order_relaxed); }
 
   _profiled_bytes.fetch_add(size, std::memory_order_relaxed);
   auto const completed = _profiled_requests.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -192,7 +205,7 @@ void IOContext::reset() noexcept
   _last_request_begin.store(std::numeric_limits<std::size_t>::max(), std::memory_order_relaxed);
   _last_request_end.store(std::numeric_limits<std::size_t>::max(), std::memory_order_relaxed);
   for (auto& word : _seen_regions) {
-    word.store(0, std::memory_order_relaxed);
+    word.store(std::numeric_limits<std::uint64_t>::max(), std::memory_order_relaxed);
   }
   _workload.store(WorkloadClass::UNKNOWN, std::memory_order_relaxed);
   _path.store(IOPath::GPU_DIRECT, std::memory_order_relaxed);
