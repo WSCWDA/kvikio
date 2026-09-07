@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -109,23 +110,34 @@ def evict_file_cache(path: Path) -> None:
         os.close(fd)
 
 
-def warm_profile(handle: kvikio.CuFile, mode: str, small_buffer, large_buffer) -> None:
+def warm_profile(
+    handle: kvikio.CuFile,
+    mode: str,
+    small_buffers: list,
+    large_buffers: list,
+) -> None:
     futures = []
     if mode == "direct":
         size = 64 * KIB
         for i in range(PROFILE_REQUESTS):
-            futures.append(handle.pread(large_buffer, size, i * size, task_size=size))
+            futures.append(
+                handle.pread(large_buffers[i], size, i * size, task_size=size)
+            )
     elif mode == "host":
         size = 4 * KIB
         for i in range(PROFILE_REQUESTS):
             futures.append(
-                handle.pread(small_buffer, size, i * 64 * KIB, task_size=size)
+                handle.pread(
+                    small_buffers[i], size, i * 64 * KIB, task_size=size
+                )
             )
     else:
         size = 4 * KIB
         for i in range(PROFILE_REQUESTS):
             futures.append(
-                handle.pread(small_buffer, size, 3 + i * size, task_size=size)
+                handle.pread(
+                    small_buffers[i], size, 3 + i * size, task_size=size
+                )
             )
     for future in futures:
         finish(future)
@@ -153,7 +165,12 @@ def run_mode(
     verify_data: bool,
 ) -> dict:
     buffers = [cupy.empty(io_size, dtype=cupy.uint8) for _ in range(batch_size)]
-    large_buffer = cupy.empty(64 * KIB, dtype=cupy.uint8)
+    profile_small_buffers = [
+        cupy.empty(4 * KIB, dtype=cupy.uint8) for _ in range(PROFILE_REQUESTS)
+    ]
+    profile_large_buffers = [
+        cupy.empty(64 * KIB, dtype=cupy.uint8) for _ in range(PROFILE_REQUESTS)
+    ]
     total_span = required_file_size(
         requests, io_size, batch_size, clusters_per_batch
     )
@@ -166,13 +183,16 @@ def run_mode(
             "request_shaping_enabled": True,
         }
     ):
+        print(f"BEGIN mode={mode}", file=sys.stderr, flush=True)
         with kvikio.CuFile(path, "r") as handle:
             file_size = path.stat().st_size
             if file_size < total_span:
                 raise ValueError(
                     f"file is too small: need at least {total_span} bytes, got {file_size}"
                 )
-            warm_profile(handle, mode, buffers[0], large_buffer)
+            warm_profile(
+                handle, mode, profile_small_buffers, profile_large_buffers
+            )
             selected = handle.io_context()
             expected = {
                 "direct": ("GPU_DIRECT", "DIRECT"),
@@ -229,6 +249,7 @@ def run_mode(
                 )
                 for key, value in shaping_total.items()
             }
+        print(f"END mode={mode}", file=sys.stderr, flush=True)
 
     return {
         "mode": mode,

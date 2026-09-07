@@ -62,6 +62,8 @@ for clusters in "${cluster_values[@]}"; do
 done
 
 mkdir -p "${RESULT_ROOT}"
+failures_path="${RESULT_ROOT}/failed_runs.txt"
+: > "${failures_path}"
 
 echo "Preparing ${DESIGN2_BENCH_FILE} for the largest requested layout"
 DESIGN2_BENCH_FILE="${DESIGN2_BENCH_FILE}" \
@@ -112,6 +114,7 @@ for clusters in "${cluster_values[@]}"; do
       json_path="${RESULT_ROOT}/${name}.json"
       log_path="${RESULT_ROOT}/${name}.log"
       tmp_json="${json_path}.tmp"
+      rm -f "${json_path}" "${tmp_json}"
 
       echo "Running clusters=${clusters}, threads=${threads}, repeat=${repeat}"
       if KVIKIO_NTHREADS="${threads}" \
@@ -129,6 +132,7 @@ for clusters in "${cluster_values[@]}"; do
         status=$?
         rm -f "${tmp_json}"
         echo "FAIL: ${name}, exit=${status}; see ${log_path}" >&2
+        echo "${name},exit=${status},log=${log_path}" >> "${failures_path}"
         run_status=1
       fi
     done
@@ -140,6 +144,9 @@ summary_status=$?
 echo "Results: ${RESULT_ROOT}"
 echo "Raw CSV: ${RESULT_ROOT}/raw_results.csv"
 echo "Summary: ${RESULT_ROOT}/summary.csv"
+if [[ -s "${failures_path}" ]]; then
+  echo "Failures: ${failures_path}"
+fi
 
 if [[ ${run_status} -ne 0 || ${summary_status} -ne 0 ]]; then
   exit 1

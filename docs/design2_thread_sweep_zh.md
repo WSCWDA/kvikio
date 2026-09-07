@@ -68,7 +68,11 @@ bash scripts/run_design2_thread_sweep.sh
 - 同名 `.log`：CuPy、CUDA、GDS错误和标准输出；
 - `raw_results.csv`：每次独立运行一行；
 - `summary.csv`：按簇数和线程数汇总的中位数；
+- `failed_runs.txt`：失败配置、退出码及对应日志；
 - `metadata.txt`：参数、Git提交和GPU信息。
+
+每次运行前会删除该测试点可能残留的旧JSON。因此失败测试不会被同名历史结果计入
+`summary.csv`。
 
 查看核心结果：
 
