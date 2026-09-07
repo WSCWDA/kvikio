@@ -291,6 +291,7 @@ def main() -> None:
     logical_requests = shaping["logical_requests"]
     payload = {
         "file": str(args.file),
+        "num_threads": kvikio.defaults.get("num_threads"),
         "results": results,
         "summary": {
             "shaped_vs_direct_iops": (
