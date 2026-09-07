@@ -19,6 +19,7 @@ import cupy
 import numpy
 
 import kvikio
+import kvikio.defaults
 
 KIB = 1024
 MIB = 1024 * KIB
