@@ -16,11 +16,6 @@ Design 2 只对满足以下条件的设备读取启用：`IOContext` 已完成 6
 和 Event；D2D 分发后记录 Event，并在 Event 完成后兑现逻辑请求的 `std::future`，不再对整个
 Stream 调用 `cuStreamSynchronize`。不能获益的请求仍作为独立物理任务提交。
 
-对于同一CUDA context的常见场景，collector在首次分发physical plan之前串行创建并注册
-全部staging slots，避免多个worker同时执行`cuMemAlloc`、`cuFileBufRegister`以及
-Stream/Event创建。初始化完成后，worker仍可并行执行`cuFileRead`和D2D分发，因此该修改
-只将控制面操作移出并发数据路径，不降低稳态plan并行度。
-
 关闭文件时，整形器先等待收集器退出，再等待所有已提交 physical task 的
 `std::future` 完成，最后才注销并释放 staging slots。仅等待活动任务计数归零是不够的：
 worker 可能已经递减计数，但其 lambda 尚未完全退出，此时提前析构整形器会形成生命周期
