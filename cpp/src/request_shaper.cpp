@@ -158,7 +158,6 @@ class RequestShaper::Impl {
     CUstream stream{};
     CUevent event{};
     CUcontext context{};
-    bool registered{};
     bool in_use{};
   };
 
@@ -555,9 +554,6 @@ class RequestShaper::Impl {
     PushAndPopContext context_guard{context};
     try {
       KVIKIO_CUDA_DRIVER_TRY(cudaAPI::instance().MemAlloc(&slot.staging, config.max_batch_bytes));
-      KVIKIO_CUFILE_TRY(cuFileAPI::instance().BufRegister(
-        reinterpret_cast<void*>(slot.staging), config.max_batch_bytes, 0));
-      slot.registered = true;
       KVIKIO_CUDA_DRIVER_TRY(
         cudaAPI::instance().StreamCreate(&slot.stream, CU_STREAM_NON_BLOCKING));
       KVIKIO_CUDA_DRIVER_TRY(
@@ -585,12 +581,6 @@ class RequestShaper::Impl {
         } catch (...) {
         }
       }
-      if (slot.registered) {
-        try {
-          cuFileAPI::instance().BufDeregister(reinterpret_cast<void*>(slot.staging));
-        } catch (...) {
-        }
-      }
       if (slot.staging != 0) {
         try {
           cudaAPI::instance().MemFree(slot.staging);
@@ -603,7 +593,6 @@ class RequestShaper::Impl {
     slot.stream     = nullptr;
     slot.event      = nullptr;
     slot.context    = nullptr;
-    slot.registered = false;
   }
 
   void release_staging_pool() noexcept
