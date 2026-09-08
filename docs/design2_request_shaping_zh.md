@@ -11,13 +11,18 @@ Design 2 只对满足以下条件的设备读取启用：`IOContext` 已完成 6
 候选组。只有候选组包含至少两个请求、对齐后的物理范围不超过 256 KiB、不会越过文件
 末尾，并且 `physical_bytes / logical_bytes <= 1.5` 时才整形。
 
-整形器维护 4 个延迟分配、长期注册的 GPU staging buffer slot。每个物理 plan 作为独立任务
+整形器维护 4 个延迟分配、长期复用的 GPU staging buffer slot。每个物理 plan 作为独立任务
 提交到 KvikIO 的设备级线程池，因此不同 plan 可以并行执行。每个 slot 拥有独立 CUDA Stream
 和 Event；D2D 分发后记录 Event，并在 Event 完成后兑现逻辑请求的 `std::future`，不再对整个
 Stream 调用 `cuStreamSynchronize`。不能获益的请求仍作为独立物理任务提交。
 
+staging slot 不显式调用 `cuFileBufRegister/cuFileBufDeregister`。这保留 Runtime 自己的 GPU
+staging pool 和请求合并，但把底层所需的临时注册交给 cuFile 管理，隔离 Pattern 4/5
+非对齐路径上并发 shaped worker 的显式注册生命周期。代价是 cuFile 可能增加一次内部
+staging copy，因此必须同时通过稳定性矩阵和 IOPS 对照验证。
+
 关闭文件时，整形器先等待收集器退出，再等待所有已提交 physical task 的
-`std::future` 完成，最后才注销并释放 staging slots。仅等待活动任务计数归零是不够的：
+`std::future` 完成，最后才释放 staging slots。仅等待活动任务计数归零是不够的：
 worker 可能已经递减计数，但其 lambda 尚未完全退出，此时提前析构整形器会形成生命周期
 竞态。
 
