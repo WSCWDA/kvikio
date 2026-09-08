@@ -73,8 +73,9 @@ class RequestPlanner {
  *
  * Logical reads are collected until either 32 requests arrive or a bounded interval expires.
  * Mergeable file ranges are dispatched concurrently through KvikIO's device thread pool, read
- * into a pool of persistent registered GPU staging buffers, and scattered to the original
- * destinations using D2D copies. CUDA events guard buffer reuse and logical completion.
+ * into a pool of persistent GPU staging buffers, and scattered to the original destinations using
+ * D2D copies. The buffers are intentionally not explicitly registered with cuFile on this
+ * unaligned-I/O path. CUDA events guard buffer reuse and logical completion.
  */
 class RequestShaper {
  public:
