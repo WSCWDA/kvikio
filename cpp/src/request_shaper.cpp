@@ -229,6 +229,18 @@ class RequestShaper::Impl {
     }
     condition.notify_all();
     if (collector.valid()) { collector.get(); }
+    // `inflight_physical` is decremented at the end of execute(), immediately before the worker
+    // lambda returns. Waiting on the counter alone can therefore let Impl and its staging slots be
+    // destroyed while a lambda that captured `this` is still completing its function epilogue.
+    // Joining the task futures closes that lifetime gap.
+    for (auto& task : physical_tasks) {
+      if (!task.valid()) { continue; }
+      try {
+        task.get();
+      } catch (...) {
+      }
+    }
+    physical_tasks.clear();
     {
       std::unique_lock lock{mutex};
       condition.wait(lock, [this] {
@@ -309,6 +321,7 @@ class RequestShaper::Impl {
 
   void dispatch(std::vector<std::shared_ptr<PendingRead>> batch) noexcept
   {
+    reap_completed_tasks();
     collection_batches.fetch_add(1, std::memory_order_relaxed);
     update_max(max_collected_requests, batch.size());
 
@@ -353,15 +366,39 @@ class RequestShaper::Impl {
 
     auto shared_batch =
       std::make_shared<std::vector<std::shared_ptr<PendingRead>>>(std::move(batch));
+    try {
+      physical_tasks.reserve(physical_tasks.size() + plans.size());
+    } catch (...) {
+      auto const error = std::current_exception();
+      for (auto const& pending : *shared_batch) {
+        set_exception(pending, error);
+      }
+      return;
+    }
     for (auto& plan : plans) {
       auto shared_plan = std::make_shared<PhysicalReadPlan>(std::move(plan));
       task_started();
       try {
-        [[maybe_unused]] auto execution = thread_pool->submit_task(
-          [this, shared_batch, shared_plan] { execute(shared_batch, shared_plan); });
+        physical_tasks.push_back(thread_pool->submit_task(
+          [this, shared_batch, shared_plan] { execute(shared_batch, shared_plan); }));
       } catch (...) {
         fail_plan(*shared_batch, *shared_plan, std::current_exception());
         task_finished();
+      }
+    }
+  }
+
+  void reap_completed_tasks() noexcept
+  {
+    for (auto task = physical_tasks.begin(); task != physical_tasks.end();) {
+      if (task->wait_for(std::chrono::seconds{0}) == std::future_status::ready) {
+        try {
+          task->get();
+        } catch (...) {
+        }
+        task = physical_tasks.erase(task);
+      } else {
+        ++task;
       }
     }
   }
@@ -587,6 +624,7 @@ class RequestShaper::Impl {
   bool closing{};
   bool closed{};
   std::future<void> collector;
+  std::vector<std::future<void>> physical_tasks;
 
   std::mutex staging_mutex;
   std::condition_variable staging_condition;

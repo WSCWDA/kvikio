@@ -16,6 +16,11 @@ Design 2 只对满足以下条件的设备读取启用：`IOContext` 已完成 6
 和 Event；D2D 分发后记录 Event，并在 Event 完成后兑现逻辑请求的 `std::future`，不再对整个
 Stream 调用 `cuStreamSynchronize`。不能获益的请求仍作为独立物理任务提交。
 
+关闭文件时，整形器先等待收集器退出，再等待所有已提交 physical task 的
+`std::future` 完成，最后才注销并释放 staging slots。仅等待活动任务计数归零是不够的：
+worker 可能已经递减计数，但其 lambda 尚未完全退出，此时提前析构整形器会形成生命周期
+竞态。
+
 设置 `KVIKIO_REQUEST_SHAPING=1` 或：
 
 ```python

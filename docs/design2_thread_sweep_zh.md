@@ -122,3 +122,17 @@ sudo sh -c 'echo 0 > /sys/module/nvidia_fs/parameters/rw_stats_enabled'
 
 CuPy多包安装警告不会改变线程扫描逻辑，但正式实验前仍建议只保留与CUDA版本匹配的一套
 CuPy，避免把环境不稳定性带入论文数据。
+
+修复或修改并发执行器后，建议先运行高并发析构压力测试：
+
+```bash
+RESULT_ROOT=/mnt/gds/cwd_test/design2-thread-sweep-soak \
+REPEATS=20 \
+NTHREADS_LIST="8 16" \
+CLUSTERS_LIST="1 4" \
+bash scripts/run_design2_thread_sweep.sh
+
+test ! -s /mnt/gds/cwd_test/design2-thread-sweep-soak/failed_runs.txt
+```
+
+只有全部80个独立进程均正常退出，才继续使用该版本生成论文性能数据。
