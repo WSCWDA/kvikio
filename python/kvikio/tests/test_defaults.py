@@ -164,6 +164,13 @@ def test_request_shaping_setting():
     assert kvikio.defaults.get("request_shaping_enabled") is before
 
 
+def test_auto_direct_io_read_overread_setting():
+    before = kvikio.defaults.get("auto_direct_io_read_overread")
+    with kvikio.defaults.set("auto_direct_io_read_overread", not before):
+        assert kvikio.defaults.get("auto_direct_io_read_overread") is not before
+    assert kvikio.defaults.get("auto_direct_io_read_overread") is before
+
+
 def test_http_max_attempts():
     before = kvikio.defaults.get("http_max_attempts")
 

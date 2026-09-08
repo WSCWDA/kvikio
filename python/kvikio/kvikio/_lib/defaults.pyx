@@ -60,6 +60,10 @@ cdef extern from "<kvikio/defaults.hpp>" namespace "kvikio" nogil:
     bool cpp_auto_direct_io_read "kvikio::defaults::auto_direct_io_read"() except +
     void cpp_set_auto_direct_io_read \
         "kvikio::defaults::set_auto_direct_io_read"(size_t flag) except +
+    bool cpp_auto_direct_io_read_overread \
+        "kvikio::defaults::auto_direct_io_read_overread"() except +
+    void cpp_set_auto_direct_io_read_overread \
+        "kvikio::defaults::set_auto_direct_io_read_overread"(bool flag) except +
     bool cpp_auto_direct_io_write "kvikio::defaults::auto_direct_io_write"() except +
     void cpp_set_auto_direct_io_write \
         "kvikio::defaults::set_auto_direct_io_write"(size_t flag) except +
@@ -223,6 +227,19 @@ def set_auto_direct_io_read(flag: bool) -> None:
     cdef bool cpp_flag = flag
     with nogil:
         cpp_set_auto_direct_io_read(cpp_flag)
+
+
+def auto_direct_io_read_overread() -> bool:
+    cdef bool result
+    with nogil:
+        result = cpp_auto_direct_io_read_overread()
+    return result
+
+
+def set_auto_direct_io_read_overread(flag: bool) -> None:
+    cdef bool cpp_flag = flag
+    with nogil:
+        cpp_set_auto_direct_io_read_overread(cpp_flag)
 
 
 def auto_direct_io_write() -> bool:

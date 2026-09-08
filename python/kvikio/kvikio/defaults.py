@@ -62,6 +62,7 @@ class ConfigContextManager:
             "http_status_codes",
             "http_timeout",
             "auto_direct_io_read",
+            "auto_direct_io_read_overread",
             "auto_direct_io_write",
         ]
 
@@ -136,6 +137,7 @@ def set(*config) -> ConfigContextManager:
         - ``"http_status_codes"``
         - ``"http_timeout"``
         - ``"auto_direct_io_read"``
+        - ``"auto_direct_io_read_overread"``
         - ``"auto_direct_io_write"``
 
     Returns
@@ -186,6 +188,7 @@ def get(config_name: str) -> Any:
         - ``"http_status_codes"``
         - ``"http_timeout"``
         - ``"auto_direct_io_read"``
+        - ``"auto_direct_io_read_overread"``
         - ``"auto_direct_io_write"``
 
     Returns
