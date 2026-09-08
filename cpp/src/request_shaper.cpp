@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <exception>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
@@ -162,12 +163,11 @@ class RequestShaper::Impl {
   };
 
   Impl(ThreadPool* thread_pool, ShapingConfig config)
-    : thread_pool{thread_pool},
+    : executor{make_executor(thread_pool, config)},
       config{config},
       planner{config},
       staging_slots(config.staging_buffer_pool_size)
   {
-    KVIKIO_EXPECT(thread_pool != nullptr, "request shaper thread pool must not be nullptr");
     KVIKIO_EXPECT(config.staging_buffer_pool_size > 0,
                   "request shaper staging buffer pool must not be empty");
   }
@@ -212,7 +212,7 @@ class RequestShaper::Impl {
       pending_reads.push_back(std::move(pending));
       if (!collector_active) {
         collector_active = true;
-        collector        = thread_pool->submit_task([this] { drain(); });
+        collector        = executor->submit_task([this] { drain(); });
       }
     }
     condition.notify_all();
@@ -247,6 +247,11 @@ class RequestShaper::Impl {
       });
       closed = true;
     }
+    // Shaped workers use CUDA and cuFile state that may be cached per thread. Destroy their
+    // bounded, per-handle executor while the CUDA context and cuFile handle are still alive;
+    // leaving those workers in the process-global defaults pool defers thread-local cleanup until
+    // static destruction, after the surrounding Python/CUDA runtime may already be tearing down.
+    executor.reset();
     release_staging_pool();
   }
 
@@ -264,6 +269,18 @@ class RequestShaper::Impl {
   }
 
  private:
+  static std::unique_ptr<ThreadPool> make_executor(ThreadPool* upstream,
+                                                   ShapingConfig const& config)
+  {
+    KVIKIO_EXPECT(upstream != nullptr, "request shaper thread pool must not be nullptr");
+    KVIKIO_EXPECT(config.staging_buffer_pool_size > 0,
+                  "request shaper staging buffer pool must not be empty");
+    auto const desired = config.staging_buffer_pool_size + 1;  // collector + physical workers
+    auto const threads = std::max<std::size_t>(
+      1, std::min<std::size_t>(upstream->get_thread_count(), desired));
+    return std::make_unique<ThreadPool>(threads);
+  }
+
   static void update_max(std::atomic<std::uint64_t>& maximum, std::uint64_t value) noexcept
   {
     auto previous = maximum.load(std::memory_order_relaxed);
@@ -378,7 +395,7 @@ class RequestShaper::Impl {
       auto shared_plan = std::make_shared<PhysicalReadPlan>(std::move(plan));
       task_started();
       try {
-        physical_tasks.push_back(thread_pool->submit_task(
+        physical_tasks.push_back(executor->submit_task(
           [this, shared_batch, shared_plan] { execute(shared_batch, shared_plan); }));
       } catch (...) {
         fail_plan(*shared_batch, *shared_plan, std::current_exception());
@@ -602,7 +619,7 @@ class RequestShaper::Impl {
     }
   }
 
-  ThreadPool* thread_pool;
+  std::unique_ptr<ThreadPool> executor;
   ShapingConfig config;
   RequestPlanner planner;
   mutable std::mutex mutex;
