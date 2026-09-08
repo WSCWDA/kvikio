@@ -17,32 +17,27 @@ from typing import Any
 
 
 NAME_PATTERN = re.compile(r"design2_c(?P<clusters>\d+)_t(?P<threads>\d+)_r(?P<repeat>\d+)")
+MODES = ("host_buffered", "host_direct", "gds_direct", "gds_shaped")
 RAW_FIELDS = [
     "case",
     "repeat",
     "clusters_per_batch",
     "num_threads",
     "requests",
-    "direct_iops",
-    "host_iops",
-    "shaped_iops",
-    "direct_mib_per_second",
-    "host_mib_per_second",
-    "shaped_mib_per_second",
-    "direct_latency_p50_us",
-    "direct_latency_p95_us",
-    "direct_latency_p99_us",
-    "host_latency_p50_us",
-    "host_latency_p95_us",
-    "host_latency_p99_us",
-    "shaped_latency_p50_us",
-    "shaped_latency_p95_us",
-    "shaped_latency_p99_us",
-    "direct_verified_requests",
-    "host_verified_requests",
-    "shaped_verified_requests",
+    "working_set_bytes",
+    "cache_policy",
+    *[f"{mode}_iops" for mode in MODES],
+    *[f"{mode}_mib_per_second" for mode in MODES],
+    *[
+        f"{mode}_latency_{percentile}_us"
+        for mode in MODES
+        for percentile in ("p50", "p95", "p99")
+    ],
+    *[f"{mode}_verified_requests" for mode in MODES],
+    *[f"{mode}_cache_drop_succeeded" for mode in MODES],
     "shaped_vs_direct_iops",
-    "shaped_vs_host_iops",
+    "shaped_vs_host_buffered_iops",
+    "shaped_vs_host_direct_iops",
     "physical_request_reduction",
     "submitted_amplification",
     "logical_requests_per_physical",
@@ -60,7 +55,7 @@ def row_from_data(path: Path, data: dict[str, Any]) -> dict[str, Any]:
     if match is None:
         raise ValueError(f"unexpected result filename: {path.name}")
     results = {result["mode"]: result for result in data["results"]}
-    if set(results) != {"direct", "host", "shaped"}:
+    if set(results) != set(MODES):
         raise ValueError(f"missing benchmark mode in {path}")
     request_counts = {int(result["requests"]) for result in results.values()}
     if len(request_counts) != 1:
@@ -79,10 +74,10 @@ def row_from_data(path: Path, data: dict[str, Any]) -> dict[str, Any]:
                 f"{path}: {mode} verified {verified} requests, expected "
                 f"either 0 or {requests}"
             )
-    shaped = results["shaped"]["context"]["shaping"]
+    shaped = results["gds_shaped"]["context"]["shaping"]
     summary = data["summary"]
     parsed_clusters = int(match.group("clusters"))
-    configured_clusters = int(results["shaped"]["clusters_per_batch"])
+    configured_clusters = int(results["gds_shaped"]["clusters_per_batch"])
     if configured_clusters != parsed_clusters:
         raise ValueError(
             f"{path}: requested {parsed_clusters} clusters but benchmark used "
@@ -95,32 +90,19 @@ def row_from_data(path: Path, data: dict[str, Any]) -> dict[str, Any]:
             f"{path}: requested {parsed_threads} threads but KvikIO used "
             f"{configured_threads}"
         )
-    return {
+    row = {
         "case": path.stem,
         "repeat": int(match.group("repeat")),
         "clusters_per_batch": configured_clusters,
         "num_threads": configured_threads,
         "requests": requests,
-        "direct_iops": results["direct"]["iops"],
-        "host_iops": results["host"]["iops"],
-        "shaped_iops": results["shaped"]["iops"],
-        "direct_mib_per_second": results["direct"]["logical_mib_per_second"],
-        "host_mib_per_second": results["host"]["logical_mib_per_second"],
-        "shaped_mib_per_second": results["shaped"]["logical_mib_per_second"],
-        "direct_latency_p50_us": results["direct"]["latency_us"]["p50"],
-        "direct_latency_p95_us": results["direct"]["latency_us"]["p95"],
-        "direct_latency_p99_us": results["direct"]["latency_us"]["p99"],
-        "host_latency_p50_us": results["host"]["latency_us"]["p50"],
-        "host_latency_p95_us": results["host"]["latency_us"]["p95"],
-        "host_latency_p99_us": results["host"]["latency_us"]["p99"],
-        "shaped_latency_p50_us": results["shaped"]["latency_us"]["p50"],
-        "shaped_latency_p95_us": results["shaped"]["latency_us"]["p95"],
-        "shaped_latency_p99_us": results["shaped"]["latency_us"]["p99"],
-        "direct_verified_requests": results["direct"]["verified_requests"],
-        "host_verified_requests": results["host"]["verified_requests"],
-        "shaped_verified_requests": results["shaped"]["verified_requests"],
+        "working_set_bytes": int(data["working_set_bytes"]),
+        "cache_policy": data["cache_policy"],
         "shaped_vs_direct_iops": summary["shaped_vs_direct_iops"],
-        "shaped_vs_host_iops": summary["shaped_vs_host_iops"],
+        "shaped_vs_host_buffered_iops": summary[
+            "shaped_vs_host_buffered_iops"
+        ],
+        "shaped_vs_host_direct_iops": summary["shaped_vs_host_direct_iops"],
         "physical_request_reduction": summary["physical_request_reduction"],
         "submitted_amplification": summary["submitted_amplification"],
         "logical_requests_per_physical": summary[
@@ -133,6 +115,19 @@ def row_from_data(path: Path, data: dict[str, Any]) -> dict[str, Any]:
         "max_inflight_physical": shaped["max_inflight_physical"],
         "direct_fallbacks": shaped["direct_fallbacks"],
     }
+    for mode in MODES:
+        result = results[mode]
+        row[f"{mode}_iops"] = result["iops"]
+        row[f"{mode}_mib_per_second"] = result["logical_mib_per_second"]
+        for percentile in ("p50", "p95", "p99"):
+            row[f"{mode}_latency_{percentile}_us"] = result["latency_us"][
+                percentile
+            ]
+        row[f"{mode}_verified_requests"] = result["verified_requests"]
+        row[f"{mode}_cache_drop_succeeded"] = bool(
+            result["cache_drop"]["succeeded"]
+        )
+    return row
 
 
 def median(group: list[dict[str, Any]], field: str) -> float:
@@ -170,75 +165,61 @@ def main() -> None:
 
     summary_rows = []
     for (clusters, threads), group in sorted(groups.items()):
-        summary_rows.append(
-            {
-                "clusters_per_batch": clusters,
-                "num_threads": threads,
-                "runs": len(group),
-                "direct_iops_median": median(group, "direct_iops"),
-                "host_iops_median": median(group, "host_iops"),
-                "shaped_iops_median": median(group, "shaped_iops"),
-                "shaped_iops_stdev": statistics.stdev(
-                    float(row["shaped_iops"]) for row in group
+        summary_row = {
+            "clusters_per_batch": clusters,
+            "num_threads": threads,
+            "runs": len(group),
+            "working_set_bytes": int(group[0]["working_set_bytes"]),
+            "cold_cache_runs": sum(
+                all(
+                    bool(row[f"{mode}_cache_drop_succeeded"])
+                    for mode in MODES
                 )
-                if len(group) > 1
-                else 0.0,
-                "direct_latency_p50_us_median": median(
-                    group, "direct_latency_p50_us"
-                ),
-                "direct_latency_p95_us_median": median(
-                    group, "direct_latency_p95_us"
-                ),
-                "direct_latency_p99_us_median": median(
-                    group, "direct_latency_p99_us"
-                ),
-                "host_latency_p50_us_median": median(
-                    group, "host_latency_p50_us"
-                ),
-                "host_latency_p95_us_median": median(
-                    group, "host_latency_p95_us"
-                ),
-                "host_latency_p99_us_median": median(
-                    group, "host_latency_p99_us"
-                ),
-                "shaped_latency_p50_us_median": median(
-                    group, "shaped_latency_p50_us"
-                ),
-                "shaped_latency_p95_us_median": median(
-                    group, "shaped_latency_p95_us"
-                ),
-                "shaped_latency_p99_us_median": median(
-                    group, "shaped_latency_p99_us"
-                ),
-                "fully_verified_runs": sum(
-                    all(
-                        int(row[f"{mode}_verified_requests"])
-                        == int(row["requests"])
-                        for mode in ("direct", "host", "shaped")
-                    )
-                    for row in group
-                ),
-                "shaped_vs_direct_median": median(
-                    group, "shaped_vs_direct_iops"
-                ),
-                "shaped_vs_host_median": median(group, "shaped_vs_host_iops"),
-                "physical_reduction_median": median(
-                    group, "physical_request_reduction"
-                ),
-                "amplification_median": median(group, "submitted_amplification"),
-                "logical_per_physical_median": median(
-                    group, "logical_requests_per_physical"
-                ),
-                "collection_batches_median": median(group, "collection_batches"),
-                "max_collected_requests_max": max(
-                    int(row["max_collected_requests"]) for row in group
-                ),
-                "max_inflight_physical_max": max(
-                    int(row["max_inflight_physical"]) for row in group
-                ),
-                "direct_fallbacks_median": median(group, "direct_fallbacks"),
-            }
-        )
+                for row in group
+            ),
+            "fully_verified_runs": sum(
+                all(
+                    int(row[f"{mode}_verified_requests"])
+                    == int(row["requests"])
+                    for mode in MODES
+                )
+                for row in group
+            ),
+            "shaped_vs_direct_median": median(
+                group, "shaped_vs_direct_iops"
+            ),
+            "shaped_vs_host_buffered_median": median(
+                group, "shaped_vs_host_buffered_iops"
+            ),
+            "shaped_vs_host_direct_median": median(
+                group, "shaped_vs_host_direct_iops"
+            ),
+            "physical_reduction_median": median(
+                group, "physical_request_reduction"
+            ),
+            "amplification_median": median(group, "submitted_amplification"),
+            "logical_per_physical_median": median(
+                group, "logical_requests_per_physical"
+            ),
+            "collection_batches_median": median(group, "collection_batches"),
+            "max_collected_requests_max": max(
+                int(row["max_collected_requests"]) for row in group
+            ),
+            "max_inflight_physical_max": max(
+                int(row["max_inflight_physical"]) for row in group
+            ),
+            "direct_fallbacks_median": median(group, "direct_fallbacks"),
+        }
+        for mode in MODES:
+            values = [float(row[f"{mode}_iops"]) for row in group]
+            summary_row[f"{mode}_iops_median"] = statistics.median(values)
+            summary_row[f"{mode}_iops_stdev"] = (
+                statistics.stdev(values) if len(values) > 1 else 0.0
+            )
+            for percentile in ("p50", "p95", "p99"):
+                field = f"{mode}_latency_{percentile}_us"
+                summary_row[f"{field}_median"] = median(group, field)
+        summary_rows.append(summary_row)
 
     summary_fields = list(summary_rows[0])
     write_csv(summary_out, summary_rows, summary_fields)

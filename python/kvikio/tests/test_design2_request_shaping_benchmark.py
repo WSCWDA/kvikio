@@ -9,6 +9,8 @@ cupy = pytest.importorskip("cupy")
 from kvikio.benchmarks.design2_request_shaping import (  # noqa: E402
     latency_summary,
     measured_offsets,
+    prepare_file,
+    required_file_size,
     verify_wave,
 )
 
@@ -51,3 +53,39 @@ def test_verify_wave_checks_every_buffer():
     buffers[1][17] ^= 1
     with pytest.raises(AssertionError, match=str(offsets[1] + 17)):
         verify_wave(buffers, offsets, 4096)
+
+
+def test_offsets_span_working_set_without_breaking_clusters():
+    working_set = 512 * 1024 * 1024
+    first = measured_offsets(0, 32, 4096, 32, 4, working_set)
+    second = measured_offsets(32, 32, 4096, 32, 4, working_set)
+
+    assert set(first).isdisjoint(second)
+    assert max(first + second) < working_set
+    for cluster in range(4):
+        begin = cluster * 8
+        assert all(
+            first[i + 1] - first[i] == 4096
+            for i in range(begin, begin + 7)
+        )
+
+
+def test_required_file_size_honors_working_set():
+    assert required_file_size(32, 4096, 32, 1, 512 * 1024 * 1024) == (
+        512 * 1024 * 1024
+    )
+
+
+def test_prepare_file_materializes_expected_pattern(tmp_path):
+    path = tmp_path / "pattern.bin"
+    prepare_file(path, 8193)
+
+    assert path.stat().st_size == 8193
+    assert path.stat().st_blocks * 512 >= 8193
+    data = path.read_bytes()
+    assert data == bytes(i % 251 for i in range(8193))
+
+    # The marker makes repeated setup idempotent.
+    mtime = path.stat().st_mtime_ns
+    prepare_file(path, 8193)
+    assert path.stat().st_mtime_ns == mtime

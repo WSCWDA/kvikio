@@ -102,9 +102,9 @@ class CuFile:
         """Get the file descriptor of the open file"""
         return self._handle.fileno()
 
-    def open_flags(self) -> int:
-        """Get the flags of the file descriptor (see open(2))"""
-        return self._handle.open_flags()
+    def open_flags(self, o_direct: bool = False) -> int:
+        """Get file-descriptor flags, optionally for the ``O_DIRECT`` fd."""
+        return self._handle.open_flags(o_direct)
 
     def host_cache_stats(self) -> dict[str, int]:
         """Return hit, miss, eviction, storage-read and H2D byte counters."""

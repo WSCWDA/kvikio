@@ -109,7 +109,7 @@ cdef extern from "<kvikio/file_handle.hpp>" namespace "kvikio" nogil:
         void close()
         bool closed()
         int fd()
-        int fd_open_flags() except +
+        int fd_open_flags(bool o_direct) except +
         future[size_t] pread(
             void* devPtr,
             size_t size,
@@ -186,10 +186,11 @@ cdef class CuFile:
             result = self._handle.fd()
         return result
 
-    def open_flags(self) -> int:
+    def open_flags(self, o_direct: bool = False) -> int:
         cdef int result
+        cdef bool cpp_o_direct = o_direct
         with nogil:
-            result = self._handle.fd_open_flags()
+            result = self._handle.fd_open_flags(cpp_o_direct)
         return result
 
     def host_cache_stats(self) -> dict[str, int]:

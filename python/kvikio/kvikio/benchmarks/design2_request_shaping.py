@@ -1,16 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Evaluate Design 2 on identical fine-grained, unaligned read requests.
+"""Evaluate four cold-storage paths on identical unaligned read requests.
 
-The three modes differ only in the 64-request profile used to select a stable IOContext policy.
-The measured request offsets and buffers are identical in every mode.
+The benchmark compares buffered Host I/O, O_DIRECT Host I/O, per-request GDS,
+and shaped GDS.  A large access domain can be used to keep the working
+set above DRAM while preserving identical logical requests in every mode.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -26,6 +28,10 @@ KIB = 1024
 MIB = 1024 * KIB
 PROFILE_REQUESTS = 64
 MEASURE_BASE = 8 * MIB + 3
+PATTERN_PERIOD = 251
+PATTERN_CHUNK_SIZE = PATTERN_PERIOD * 256 * KIB
+PATTERN_MARKER_VERSION = 2
+DEFAULT_MODES = ("host_buffered", "host_direct", "gds_direct", "gds_shaped")
 
 
 def layout(
@@ -46,6 +52,7 @@ def measured_offsets(
     io_size: int,
     batch_size: int,
     clusters_per_batch: int,
+    working_set_bytes: int | None = None,
 ) -> list[int]:
     requests_per_cluster = batch_size // clusters_per_batch
     cluster_stride, _ = layout(
@@ -53,9 +60,25 @@ def measured_offsets(
     )
     wave = wave_begin // batch_size
     wave_stride = clusters_per_batch * cluster_stride
+    if working_set_bytes is None:
+        wave_slot = wave
+    else:
+        usable_bytes = working_set_bytes - MEASURE_BASE - 8192
+        slots = usable_bytes // wave_stride
+        total_waves = (wave_begin + wave_count + batch_size - 1) // batch_size
+        if slots < total_waves or slots < 1:
+            raise ValueError(
+                "working set is too small for the requested batch layout"
+            )
+        # A deterministic affine permutation spreads waves across the complete
+        # working set without turning requests inside a cluster into random I/O.
+        stride = min(104729, slots - 1) if slots > 1 else 1
+        while stride > 1 and math.gcd(stride, slots) != 1:
+            stride -= 1
+        wave_slot = (17 + wave * stride) % slots
     return [
         MEASURE_BASE
-        + wave * wave_stride
+        + wave_slot * wave_stride
         + (i // requests_per_cluster) * cluster_stride
         + (i % requests_per_cluster) * io_size
         for i in range(wave_count)
@@ -67,33 +90,82 @@ def required_file_size(
     io_size: int,
     batch_size: int,
     clusters_per_batch: int,
+    working_set_bytes: int | None = None,
 ) -> int:
     cluster_stride, waves = layout(
         requests, io_size, batch_size, clusters_per_batch
     )
-    return max(
+    layout_size = max(
         MEASURE_BASE + waves * clusters_per_batch * cluster_stride + 8192,
         16 * MIB,
     )
+    return max(layout_size, working_set_bytes or 0)
 
 
 def prepare_file(path: Path, size: int) -> None:
+    """Materialize a deterministic file, reusing a matching prepared file.
+
+    Merely truncating or fallocating a 256+ GiB file would leave unwritten
+    extents that filesystems can satisfy as zeros without device reads.  Every
+    byte is therefore written once.  The repeated pattern is position-correct
+    because ``PATTERN_CHUNK_SIZE`` is divisible by ``PATTERN_PERIOD``.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    marker = path.with_name(path.name + ".design2-pattern.json")
+    try:
+        metadata = json.loads(marker.read_text(encoding="utf-8"))
+        if (
+            path.stat().st_size == size
+            and metadata == {
+                "version": PATTERN_MARKER_VERSION,
+                "size": size,
+                "period": PATTERN_PERIOD,
+            }
+        ):
+            return
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+
     fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o644)
     try:
         offset = 0
-        chunk_size = MIB
+        pattern = bytes(range(PATTERN_PERIOD)) * (
+            PATTERN_CHUNK_SIZE // PATTERN_PERIOD
+        )
+        next_progress = 8 * 1024 * MIB
         while offset < size:
-            nbytes = min(chunk_size, size - offset)
-            chunk = (numpy.arange(nbytes, dtype=numpy.uint64) + offset) % 251
-            data = chunk.astype(numpy.uint8, copy=False).tobytes()
-            written = os.pwrite(fd, data, offset)
-            if written != nbytes:
-                raise RuntimeError(f"short preparation write: {written} != {nbytes}")
-            offset += written
+            data = memoryview(pattern)[: min(len(pattern), size - offset)]
+            while data:
+                written = os.write(fd, data)
+                if written <= 0:
+                    raise RuntimeError("short preparation write")
+                offset += written
+                data = data[written:]
+            if offset >= next_progress:
+                print(
+                    f"Prepared {offset / (1024**3):.1f}/{size / (1024**3):.1f} GiB",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                next_progress += 8 * 1024 * MIB
         os.fsync(fd)
     finally:
         os.close(fd)
+    marker_tmp = marker.with_suffix(marker.suffix + ".tmp")
+    marker_tmp.write_text(
+        json.dumps(
+            {
+                "version": PATTERN_MARKER_VERSION,
+                "size": size,
+                "period": PATTERN_PERIOD,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.replace(marker_tmp, marker)
+    evict_file_cache(path)
 
 
 def finish(future) -> int:
@@ -110,6 +182,33 @@ def evict_file_cache(path: Path) -> None:
         os.close(fd)
 
 
+def cached_kib() -> int:
+    for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+        if line.startswith("Cached:"):
+            return int(line.split()[1])
+    return -1
+
+
+def drop_global_page_cache(path: Path) -> dict[str, int | bool]:
+    """Evict this file and the global Linux page cache or fail explicitly."""
+    before = cached_kib()
+    os.sync()
+    evict_file_cache(path)
+    try:
+        with open("/proc/sys/vm/drop_caches", "w", encoding="ascii") as file:
+            file.write("3\n")
+    except OSError as error:
+        raise PermissionError(
+            "cold-cache mode requires root and writable /proc/sys/vm/drop_caches"
+        ) from error
+    return {
+        "requested": True,
+        "succeeded": True,
+        "cached_kib_before": before,
+        "cached_kib_after": cached_kib(),
+    }
+
+
 def warm_profile(
     handle: kvikio.CuFile,
     mode: str,
@@ -117,13 +216,13 @@ def warm_profile(
     large_buffers: list,
 ) -> None:
     futures = []
-    if mode == "direct":
+    if mode == "gds_direct":
         size = 64 * KIB
         for i in range(PROFILE_REQUESTS):
             futures.append(
                 handle.pread(large_buffers[i], size, i * size, task_size=size)
             )
-    elif mode == "host":
+    elif mode in ("host_buffered", "host_direct"):
         size = 4 * KIB
         for i in range(PROFILE_REQUESTS):
             futures.append(
@@ -192,6 +291,8 @@ def run_mode(
     batch_size: int,
     clusters_per_batch: int,
     verify_data: bool,
+    working_set_bytes: int | None = None,
+    drop_caches: bool = False,
 ) -> dict:
     buffers = [cupy.empty(io_size, dtype=cupy.uint8) for _ in range(batch_size)]
     profile_small_buffers = [
@@ -201,8 +302,16 @@ def run_mode(
         cupy.empty(64 * KIB, dtype=cupy.uint8) for _ in range(PROFILE_REQUESTS)
     ]
     total_span = required_file_size(
-        requests, io_size, batch_size, clusters_per_batch
+        requests,
+        io_size,
+        batch_size,
+        clusters_per_batch,
+        working_set_bytes,
     )
+
+    if mode not in DEFAULT_MODES:
+        raise ValueError(f"unknown mode: {mode}")
+    host_direct = mode == "host_direct"
 
     with kvikio.defaults.set(
         {
@@ -210,6 +319,8 @@ def run_mode(
             "gds_threshold": 0,
             "host_cache_enabled": False,
             "request_shaping_enabled": True,
+            "auto_direct_io_read": host_direct,
+            "auto_direct_io_read_overread": host_direct,
         }
     ):
         print(f"BEGIN mode={mode}", file=sys.stderr, flush=True)
@@ -219,19 +330,32 @@ def run_mode(
                 raise ValueError(
                     f"file is too small: need at least {total_span} bytes, got {file_size}"
                 )
+            direct_fd_flags = None
+            if mode == "host_direct":
+                direct_fd_flags = handle.open_flags(True)
+                if not direct_fd_flags & os.O_DIRECT:
+                    raise RuntimeError(
+                        "host_direct requested, but KvikIO did not open an O_DIRECT fd"
+                    )
             warm_profile(
                 handle, mode, profile_small_buffers, profile_large_buffers
             )
             selected = handle.io_context()
             expected = {
-                "direct": ("GPU_DIRECT", "DIRECT"),
-                "host": ("HOST_MEDIATED", "DIRECT"),
-                "shaped": ("GPU_DIRECT", "SHAPED"),
+                "gds_direct": ("GPU_DIRECT", "DIRECT"),
+                "host_buffered": ("HOST_MEDIATED", "DIRECT"),
+                "host_direct": ("HOST_MEDIATED", "DIRECT"),
+                "gds_shaped": ("GPU_DIRECT", "SHAPED"),
             }[mode]
             if (selected["path"], selected["submit"]) != expected:
                 raise RuntimeError(f"unexpected {mode} policy: {selected}")
             shaping_before = selected["shaping"].copy()
 
+            cache_drop = (
+                drop_global_page_cache(path)
+                if drop_caches
+                else {"requested": False, "succeeded": False}
+            )
             evict_file_cache(path)
             cupy.cuda.runtime.deviceSynchronize()
             begin = time.perf_counter()
@@ -248,6 +372,7 @@ def run_mode(
                     io_size,
                     batch_size,
                     clusters_per_batch,
+                    working_set_bytes,
                 )
                 futures = []
                 submitted_ns = []
@@ -303,6 +428,7 @@ def run_mode(
                         io_size,
                         batch_size,
                         clusters_per_batch,
+                        working_set_bytes,
                     )
                     futures = [
                         handle.pread(
@@ -330,6 +456,20 @@ def run_mode(
         "io_size": io_size,
         "batch_size": batch_size,
         "clusters_per_batch": clusters_per_batch,
+        "working_set_bytes": total_span,
+        "backend": {
+            "path": "HOST_MEDIATED" if mode.startswith("host_") else "GPU_DIRECT",
+            "host_io": (
+                "O_DIRECT_OVERREAD"
+                if mode == "host_direct"
+                else "BUFFERED"
+                if mode == "host_buffered"
+                else "NONE"
+            ),
+            "page_cache_cold": bool(drop_caches),
+            "direct_fd_open_flags": direct_fd_flags,
+        },
+        "cache_drop": cache_drop,
         "completed_bytes": completed,
         "elapsed_seconds": elapsed,
         "iops": requests / elapsed,
@@ -350,6 +490,11 @@ def main() -> None:
     parser.add_argument("--io-size", type=int, default=4096)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--clusters-per-batch", type=int, default=1)
+    parser.add_argument("--working-set-bytes", type=int)
+    parser.add_argument(
+        "--modes", nargs="+", choices=DEFAULT_MODES, default=list(DEFAULT_MODES)
+    )
+    parser.add_argument("--drop-caches", action="store_true")
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--output", type=Path)
@@ -369,6 +514,7 @@ def main() -> None:
         args.io_size,
         args.batch_size,
         args.clusters_per_batch,
+        args.working_set_bytes,
     )
     if args.prepare:
         prepare_file(args.file, required_size)
@@ -382,22 +528,31 @@ def main() -> None:
             args.batch_size,
             args.clusters_per_batch,
             args.verify,
+            args.working_set_bytes,
+            args.drop_caches,
         )
-        for mode in ("direct", "host", "shaped")
+        for mode in args.modes
     ]
     by_mode = {result["mode"]: result for result in results}
-    shaping = by_mode["shaped"]["context"]["shaping"]
+    if set(by_mode) != set(DEFAULT_MODES):
+        parser.error("--modes must contain all four modes for comparable output")
+    shaping = by_mode["gds_shaped"]["context"]["shaping"]
     logical_requests = shaping["logical_requests"]
     payload = {
         "file": str(args.file),
+        "working_set_bytes": required_size,
+        "cache_policy": "global_drop_caches" if args.drop_caches else "file_fadvise_only",
         "num_threads": kvikio.defaults.get("num_threads"),
         "results": results,
         "summary": {
             "shaped_vs_direct_iops": (
-                by_mode["shaped"]["iops"] / by_mode["direct"]["iops"]
+                by_mode["gds_shaped"]["iops"] / by_mode["gds_direct"]["iops"]
             ),
-            "shaped_vs_host_iops": (
-                by_mode["shaped"]["iops"] / by_mode["host"]["iops"]
+            "shaped_vs_host_buffered_iops": (
+                by_mode["gds_shaped"]["iops"] / by_mode["host_buffered"]["iops"]
+            ),
+            "shaped_vs_host_direct_iops": (
+                by_mode["gds_shaped"]["iops"] / by_mode["host_direct"]["iops"]
             ),
             "physical_request_reduction": (
                 0.0
