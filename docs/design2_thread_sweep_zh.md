@@ -136,3 +136,5 @@ test ! -s /mnt/gds/cwd_test/design2-thread-sweep-soak/failed_runs.txt
 ```
 
 只有全部80个独立进程均正常退出，才继续使用该版本生成论文性能数据。
+若使用`CUDA_LAUNCH_BLOCKING=1`仍出现退出阶段堆损坏，应优先检查staging buffer注册和
+注销生命周期，而不是将问题归因于未完成的D2D异步拷贝。

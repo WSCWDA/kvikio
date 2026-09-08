@@ -364,6 +364,16 @@ class RequestShaper::Impl {
       return;
     }
 
+    try {
+      prepare_initial_staging_pool(batch, plans);
+    } catch (...) {
+      auto const error = std::current_exception();
+      for (auto const& pending : batch) {
+        set_exception(pending, error);
+      }
+      return;
+    }
+
     auto shared_batch =
       std::make_shared<std::vector<std::shared_ptr<PendingRead>>>(std::move(batch));
     try {
@@ -400,6 +410,44 @@ class RequestShaper::Impl {
       } else {
         ++task;
       }
+    }
+  }
+
+  void prepare_initial_staging_pool(
+    std::vector<std::shared_ptr<PendingRead>> const& batch,
+    std::vector<PhysicalReadPlan> const& plans)
+  {
+    CUcontext context{};
+    for (auto const& plan : plans) {
+      if (!plan.shaped) { continue; }
+      auto const plan_context = batch.at(plan.slices.front().logical_id)->request.context;
+      if (context == nullptr) {
+        context = plan_context;
+      } else if (context != plan_context) {
+        // Mixed-context files retain the existing lazy per-slot initialization path.
+        return;
+      }
+    }
+    if (context == nullptr) { return; }
+
+    std::lock_guard lock{staging_mutex};
+    if (std::any_of(staging_slots.begin(), staging_slots.end(),
+                    [](auto const& slot) { return slot.in_use || slot.staging != 0; })) {
+      return;
+    }
+
+    try {
+      // cuFile buffer registration is control-plane work. Initialize the whole pool serially on
+      // the collector before physical workers start, then keep only reads and D2D copies on the
+      // concurrent path.
+      for (auto& slot : staging_slots) {
+        prepare_staging(slot, context);
+      }
+    } catch (...) {
+      for (auto& slot : staging_slots) {
+        destroy_staging(slot);
+      }
+      throw;
     }
   }
 
