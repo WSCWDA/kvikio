@@ -136,3 +136,7 @@ test ! -s /mnt/gds/cwd_test/design2-thread-sweep-soak/failed_runs.txt
 ```
 
 只有全部80个独立进程均正常退出，才继续使用该版本生成论文性能数据。
+
+Request Shaper 使用由 `KVIKIO_NTHREADS` 限定的 per-handle executor，但物理并发同时受 4 个
+staging slots 限制。因此 8 与 16 线程仍用于退出稳定性压力测试，不应预期 shaped 吞吐随线程数
+从 8 到 16 继续线性增长。
