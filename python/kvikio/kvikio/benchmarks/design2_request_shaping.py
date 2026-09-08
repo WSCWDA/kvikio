@@ -143,16 +143,45 @@ def warm_profile(
         finish(future)
 
 
-def verify(path: Path, buffers, offsets: list[int], io_size: int) -> None:
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        for buf, offset in zip(buffers, offsets):
-            expected = os.pread(fd, io_size, offset)
-            actual = cupy.asnumpy(buf).tobytes()
-            if actual != expected:
-                raise AssertionError(f"data mismatch at file offset {offset}")
-    finally:
-        os.close(fd)
+def verify_wave(buffers, offsets: list[int], io_size: int) -> None:
+    """Verify a wave before its reusable GPU buffers are overwritten.
+
+    ``prepare_file()`` stores byte ``file_offset % 251`` at every position.  Build
+    the expected data from that invariant instead of reading the file through
+    POSIX, which would populate the page cache and bias the Host baseline.
+    """
+    relative = numpy.arange(io_size, dtype=numpy.uint64)
+    for buf, offset in zip(buffers, offsets):
+        expected = ((relative + offset) % 251).astype(numpy.uint8)
+        actual = cupy.asnumpy(buf).reshape(-1)
+        if not numpy.array_equal(actual, expected):
+            mismatch = int(numpy.flatnonzero(actual != expected)[0])
+            raise AssertionError(
+                f"data mismatch at file offset {offset + mismatch}"
+            )
+
+
+def latency_summary(latency_ns: list[int]) -> dict[str, float | int]:
+    """Return compact host-observed, end-to-end logical request latency stats."""
+    if not latency_ns:
+        return {
+            "count": 0,
+            "mean": 0.0,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+            "max": 0.0,
+        }
+    latency_us = numpy.asarray(latency_ns, dtype=numpy.float64) / 1_000.0
+    p50, p95, p99 = numpy.percentile(latency_us, (50, 95, 99))
+    return {
+        "count": len(latency_ns),
+        "mean": float(latency_us.mean()),
+        "p50": float(p50),
+        "p95": float(p95),
+        "p99": float(p99),
+        "max": float(latency_us.max()),
+    }
 
 
 def run_mode(
@@ -207,8 +236,10 @@ def run_mode(
             cupy.cuda.runtime.deviceSynchronize()
             begin = time.perf_counter()
             completed = 0
-            last_buffers = []
-            last_offsets = []
+            verified_requests = 0
+            verified_bytes = 0
+            verification_seconds = 0.0
+            latency_ns = []
             for wave_begin in range(0, requests, batch_size):
                 wave_count = min(batch_size, requests - wave_begin)
                 offsets = measured_offsets(
@@ -218,17 +249,25 @@ def run_mode(
                     batch_size,
                     clusters_per_batch,
                 )
-                futures = [
-                    handle.pread(buffers[i], io_size, offsets[i], task_size=io_size)
-                    for i in range(wave_count)
-                ]
-                completed += sum(finish(future) for future in futures)
-                last_buffers = buffers[:wave_count]
-                last_offsets = offsets
+                futures = []
+                submitted_ns = []
+                for i in range(wave_count):
+                    submitted_ns.append(time.perf_counter_ns())
+                    futures.append(
+                        handle.pread(
+                            buffers[i], io_size, offsets[i], task_size=io_size
+                        )
+                    )
+                for future, request_begin_ns in zip(futures, submitted_ns):
+                    completed += finish(future)
+                    latency_ns.append(time.perf_counter_ns() - request_begin_ns)
             cupy.cuda.runtime.deviceSynchronize()
             elapsed = time.perf_counter() - begin
-            if verify_data:
-                verify(path, last_buffers, last_offsets, io_size)
+            expected_bytes = requests * io_size
+            if completed != expected_bytes:
+                raise RuntimeError(
+                    f"short benchmark read: {completed} != {expected_bytes}"
+                )
             context = handle.io_context()
             shaping_total = context["shaping"]
             cumulative = {
@@ -249,6 +288,40 @@ def run_mode(
                 )
                 for key, value in shaping_total.items()
             }
+
+            # Replay the complete request stream outside the timed region.  Each
+            # wave is checked before its GPU buffers are reused, so --verify now
+            # covers every logical request without contaminating performance or
+            # latency measurements with D2H validation work.
+            if verify_data:
+                verify_begin = time.perf_counter()
+                for wave_begin in range(0, requests, batch_size):
+                    wave_count = min(batch_size, requests - wave_begin)
+                    offsets = measured_offsets(
+                        wave_begin,
+                        wave_count,
+                        io_size,
+                        batch_size,
+                        clusters_per_batch,
+                    )
+                    futures = [
+                        handle.pread(
+                            buffers[i], io_size, offsets[i], task_size=io_size
+                        )
+                        for i in range(wave_count)
+                    ]
+                    for future in futures:
+                        finish(future)
+                    verify_wave(buffers[:wave_count], offsets, io_size)
+                    verified_requests += wave_count
+                    verified_bytes += wave_count * io_size
+                cupy.cuda.runtime.deviceSynchronize()
+                verification_seconds = time.perf_counter() - verify_begin
+                if verified_requests != requests:
+                    raise RuntimeError(
+                        "incomplete verification replay: "
+                        f"{verified_requests} != {requests}"
+                    )
         print(f"END mode={mode}", file=sys.stderr, flush=True)
 
     return {
@@ -261,6 +334,11 @@ def run_mode(
         "elapsed_seconds": elapsed,
         "iops": requests / elapsed,
         "logical_mib_per_second": completed / MIB / elapsed,
+        "latency_us": latency_summary(latency_ns),
+        "verification_mode": "full_replay" if verify_data else "disabled",
+        "verified_requests": verified_requests,
+        "verified_bytes": verified_bytes,
+        "verification_seconds": verification_seconds,
         "context": context,
     }
 

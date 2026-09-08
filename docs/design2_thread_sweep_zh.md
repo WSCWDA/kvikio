@@ -40,8 +40,10 @@ CLUSTERS_LIST="1 4" \
 bash scripts/run_design2_thread_sweep.sh
 ```
 
-默认参数为 8192 个 4 KiB 请求、逻辑 batch size 32，并执行数据正确性校验。脚本只在开始
-时创建一次测试文件。之后每个配置均通过独立命令：
+默认参数为 8192 个 4 KiB 请求、逻辑 batch size 32，并执行全请求数据正确性校验。每个模式
+先完成不含校验开销的计时阶段，再完整重放相同的 8192 个请求；重放时每个 wave 都在 GPU
+buffer 被复用前逐字节校验。预期数据由测试文件的确定性内容直接生成，不通过 POSIX 再读文件，
+避免校验过程污染 page cache。脚本只在开始时创建一次测试文件。之后每个配置均通过独立命令：
 
 ```bash
 KVIKIO_NTHREADS=<线程数> python -m kvikio.benchmarks.design2_request_shaping ...
@@ -58,7 +60,19 @@ DESIGN2_BENCH_FILE=/mnt/gds/cwd_test/design2-thread-sweep.bin \
 bash scripts/run_design2_thread_sweep.sh
 ```
 
-如果暂时不需要逐请求数据校验，可以设置 `VERIFY=0`；正式论文实验应保留默认校验。
+如果暂时不需要全请求校验，可以设置 `VERIFY=0`；正式论文实验应保留默认校验，并确认
+`fully_verified_runs == runs`。
+
+只补测此前稳定性矩阵中缺少的 1/2/4 线程性能点，可运行：
+
+```bash
+DESIGN2_BENCH_FILE=/mnt/gds/cwd_test/design2-thread-sweep.bin \
+RESULT_ROOT=/mnt/gds/cwd_test/design2-thread-sweep-low-threads \
+REPEATS=10 \
+NTHREADS_LIST="1 2 4" \
+CLUSTERS_LIST="1 4" \
+bash scripts/run_design2_thread_sweep.sh
+```
 
 ## 3. 输出文件
 
@@ -70,6 +84,17 @@ bash scripts/run_design2_thread_sweep.sh
 - `summary.csv`：按簇数和线程数汇总的中位数；
 - `failed_runs.txt`：失败配置、退出码及对应日志；
 - `metadata.txt`：参数、Git提交和GPU信息。
+
+每个模式的 JSON 还包含：
+
+- `latency_us.{mean,p50,p95,p99,max}`：从调用 `pread()` 前到按提交顺序观察到 Future
+  完成为止的逻辑请求端到端延迟；
+- `verified_requests` 和 `verified_bytes`：计时后完整重放并校验的数据量；
+- `verification_seconds`：完整校验重放耗时，不计入 `elapsed_seconds`、IOPS和延迟。
+
+这里的延迟是应用按提交顺序调用 `Future.get()` 时可观察的完成延迟，包含 collector 等待、物理
+I/O和D2D分发，但不是设备内部完成时间；因此可用于比较三种模式的API可见尾延迟，不应解释为
+单次 `cuFileRead` 的纯设备延迟。
 
 每次运行前会删除该测试点可能残留的旧JSON。因此失败测试不会被同名历史结果计入
 `summary.csv`。
@@ -96,6 +121,7 @@ python scripts/summarize_design2_thread_sweep.py \
 2. `max_collected_requests_max` 理想为32；若持续低于32，瓶颈仍包括200微秒收集窗口。
 3. `logical_per_physical_median` 理想接近8，`physical_reduction_median` 理想接近0.875。
 4. `amplification_median` 理想接近1.125，明显低于逐请求对齐的2.0。
+5. `fully_verified_runs` 必须等于 `runs`；否则该配置不能进入论文性能结果。
 
 然后比较性能：
 
@@ -103,6 +129,8 @@ python scripts/summarize_design2_thread_sweep.py \
 - `shaped_vs_host_median > 1`：Shaped GDS超过当前Host路径；
 - 如果Direct随线程增加而增长、Shaped没有增长，瓶颈在收集/D2D/Event阶段；
 - 如果二者在相同线程点同时饱和，瓶颈更可能位于SSD、NVFS或PCIe路径。
+- `shaped_latency_p95_us_median` 和 `shaped_latency_p99_us_median` 用于判断合并收益是否以明显
+  增加尾延迟为代价。
 
 论文结论必须采用同一线程数下的Direct和Shaped结果，不应使用单线程Direct与多线程Shaped
 交叉比较。建议报告5次中位数和标准差，并保留所有原始JSON。

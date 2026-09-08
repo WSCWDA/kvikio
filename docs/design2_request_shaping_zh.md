@@ -82,6 +82,10 @@ grep -E 'IO stats|Ops' /proc/driver/nvidia-fs/stats
 Benchmark 输出以下关键指标：
 
 - `iops` 和 `logical_mib_per_second`：端到端性能；
+- `latency_us.mean/p50/p95/p99/max`：应用按提交顺序等待 Future 时观察到的逻辑请求延迟，
+  包含收集、物理读取和D2D分发；
+- `verified_requests`：计时结束后完整重放并逐字节校验的请求数，应与 `requests` 相等；
+- `verification_seconds`：完整校验耗时，不进入性能和延迟结果；
 - `context.shaping.logical_requests`：进入整形器的逻辑请求数；
 - `context.shaping.physical_requests`：实际调用 cuFile 的请求数；
 - `context.shaping.shaped_groups`：成功合并的请求组数；

@@ -102,6 +102,7 @@ fi
   echo "repeats=${REPEATS}"
   echo "nthreads=${NTHREADS_LIST}"
   echo "clusters=${CLUSTERS_LIST}"
+  echo "verify=${VERIFY}"
   git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null | sed 's/^/git_commit=/' || true
   nvidia-smi -L 2>/dev/null || true
 } > "${RESULT_ROOT}/metadata.txt"
