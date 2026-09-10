@@ -110,7 +110,10 @@ FileHandle::FileHandle(std::string const& file_path,
   if (host_cache_enabled) {
     _host_cache = std::make_unique<detail::HostCache>(defaults::host_cache_capacity(),
                                                       defaults::host_cache_line_size(),
-                                                      defaults::host_cache_max_io_size());
+                                                      defaults::host_cache_max_io_size(),
+                                                      defaults::host_cache_region_size(),
+                                                      defaults::host_cache_admission_threshold(),
+                                                      defaults::host_cache_max_regions());
   }
 }
 

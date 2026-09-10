@@ -140,6 +140,9 @@ def test_host_cache_settings():
         "host_cache_capacity",
         "host_cache_line_size",
         "host_cache_max_io_size",
+        "host_cache_region_size",
+        "host_cache_admission_threshold",
+        "host_cache_max_regions",
     ]
     before = {key: kvikio.defaults.get(key) for key in keys}
     with kvikio.defaults.set(
@@ -148,13 +151,26 @@ def test_host_cache_settings():
             "host_cache_capacity": 4 * 65536,
             "host_cache_line_size": 65536,
             "host_cache_max_io_size": 4096,
+            "host_cache_region_size": 4 * 65536,
+            "host_cache_admission_threshold": 3,
+            "host_cache_max_regions": 128,
         }
     ):
         assert kvikio.defaults.get("host_cache_enabled") is True
         assert kvikio.defaults.get("host_cache_capacity") == 4 * 65536
         assert kvikio.defaults.get("host_cache_line_size") == 65536
         assert kvikio.defaults.get("host_cache_max_io_size") == 4096
+        assert kvikio.defaults.get("host_cache_region_size") == 4 * 65536
+        assert kvikio.defaults.get("host_cache_admission_threshold") == 3
+        assert kvikio.defaults.get("host_cache_max_regions") == 128
     assert {key: kvikio.defaults.get(key) for key in keys} == before
+
+    with pytest.raises(ValueError, match="whole number of cache lines"):
+        kvikio.defaults.set("host_cache_region_size", 65536 + 4096)
+    with pytest.raises(ValueError, match=r"\[1, 255\]"):
+        kvikio.defaults.set("host_cache_admission_threshold", 0)
+    with pytest.raises(ValueError, match="must be positive"):
+        kvikio.defaults.set("host_cache_max_regions", 0)
 
 
 def test_request_shaping_setting():

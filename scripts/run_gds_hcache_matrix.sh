@@ -21,6 +21,11 @@ IO_SIZES=(4096 16384 65536)
 LINE_SIZES=(65536 262144)
 CAPS=(16777216 33554432 67108864 134217728)
 HOT_BYTES="${HOT_BYTES:-67108864}"
+REGION_SIZE="${REGION_SIZE:-1048576}"
+ADMISSION_THRESHOLDS="${ADMISSION_THRESHOLDS:-1 2}"
+MAX_REGIONS="${MAX_REGIONS:-4096}"
+
+read -r -a admission_threshold_values <<< "${ADMISSION_THRESHOLDS}"
 
 mkdir -p "${RESULT_ROOT}"
 
@@ -38,6 +43,7 @@ run_case() {
   local line_size="$4"
   local cache_bytes="$5"
   local repeat="$6"
+  local admission_threshold="$7"
   local json_path="${RESULT_ROOT}/${name}_r${repeat}.json"
   local log_path="${RESULT_ROOT}/${name}_r${repeat}.log"
   local tmp_json="${json_path}.tmp"
@@ -49,12 +55,18 @@ run_case() {
   KVIKIO_HOST_CACHE_CAPACITY="${cache_bytes}" \
   KVIKIO_HOST_CACHE_LINE_SIZE="${line_size}" \
   KVIKIO_HOST_CACHE_MAX_IO_SIZE="${io_size}" \
+  KVIKIO_HOST_CACHE_REGION_SIZE="${REGION_SIZE}" \
+  KVIKIO_HOST_CACHE_ADMISSION_THRESHOLD="${admission_threshold}" \
+  KVIKIO_HOST_CACHE_MAX_REGIONS="${MAX_REGIONS}" \
   "${PYTHON_BIN}" -m kvikio.benchmarks.gds_hcache \
     --file "${HCACHE_BENCH_FILE}" \
     --path "${path}" \
     --io-size "${io_size}" \
     --line-size "${line_size}" \
     --host-max "${io_size}" \
+    --region-size "${REGION_SIZE}" \
+    --admission-threshold "${admission_threshold}" \
+    --max-regions "${MAX_REGIONS}" \
     --cache-bytes "${cache_bytes}" \
     --hot-bytes "${HOT_BYTES}" \
     --requests "${REQUESTS}" \
@@ -76,8 +88,8 @@ run_case() {
 status=0
 for repeat in $(seq 1 "${REPEATS}"); do
   for io_size in "${IO_SIZES[@]}"; do
-    run_case "gds_io${io_size}" "gds" "${io_size}" 65536 67108864 "${repeat}" || status=1
-    run_case "posix_io${io_size}" "posix" "${io_size}" 65536 67108864 "${repeat}" || status=1
+    run_case "gds_io${io_size}" "gds" "${io_size}" 65536 67108864 "${repeat}" 2 || status=1
+    run_case "posix_io${io_size}" "posix" "${io_size}" 65536 67108864 "${repeat}" 2 || status=1
   done
 
   for io_size in "${IO_SIZES[@]}"; do
@@ -85,18 +97,21 @@ for repeat in $(seq 1 "${REPEATS}"); do
       if (( io_size > line_size )); then
         continue
       fi
-      for cache_bytes in "${CAPS[@]}"; do
-        if (( cache_bytes < line_size )); then
-          continue
-        fi
-        cap_mib=$((cache_bytes / 1024 / 1024))
-        run_case \
-          "hcache_io${io_size}_line${line_size}_cap${cap_mib}m" \
-          "hcache" \
-          "${io_size}" \
-          "${line_size}" \
-          "${cache_bytes}" \
-          "${repeat}" || status=1
+      for admission_threshold in "${admission_threshold_values[@]}"; do
+        for cache_bytes in "${CAPS[@]}"; do
+          if (( cache_bytes < line_size )); then
+            continue
+          fi
+          cap_mib=$((cache_bytes / 1024 / 1024))
+          run_case \
+            "hcache_io${io_size}_line${line_size}_cap${cap_mib}m_admit${admission_threshold}" \
+            "hcache" \
+            "${io_size}" \
+            "${line_size}" \
+            "${cache_bytes}" \
+            "${repeat}" \
+            "${admission_threshold}" || status=1
+        done
       done
     done
   done

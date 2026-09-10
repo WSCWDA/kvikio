@@ -87,4 +87,6 @@ kvikio_add_test(NAME IO_CONTEXT_TEST SOURCES test_io_context.cpp)
 
 kvikio_add_test(NAME REQUEST_SHAPER_TEST SOURCES test_request_shaper.cpp)
 
+kvikio_add_test(NAME HOST_CACHE_TEST SOURCES test_host_cache.cpp)
+
 rapids_test_install_relocatable(INSTALL_COMPONENT_SET testing DESTINATION bin/tests/libkvikio)

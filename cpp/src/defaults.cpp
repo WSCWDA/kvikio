@@ -119,6 +119,10 @@ defaults::defaults()
     ssize_t const capacity = getenv_or("KVIKIO_HOST_CACHE_CAPACITY", 1024 * 1024 * 1024);
     ssize_t const line_size = getenv_or("KVIKIO_HOST_CACHE_LINE_SIZE", 64 * 1024);
     ssize_t const max_io = getenv_or("KVIKIO_HOST_CACHE_MAX_IO_SIZE", 64 * 1024);
+    ssize_t const region_size = getenv_or("KVIKIO_HOST_CACHE_REGION_SIZE", 1024 * 1024);
+    ssize_t const admission_threshold =
+      getenv_or("KVIKIO_HOST_CACHE_ADMISSION_THRESHOLD", 2);
+    ssize_t const max_regions = getenv_or("KVIKIO_HOST_CACHE_MAX_REGIONS", 4096);
     KVIKIO_EXPECT(capacity > 0, "KVIKIO_HOST_CACHE_CAPACITY must be positive", std::invalid_argument);
     KVIKIO_EXPECT(line_size >= 4096 && (line_size & (line_size - 1)) == 0,
                   "KVIKIO_HOST_CACHE_LINE_SIZE must be a power of two and at least 4096",
@@ -129,9 +133,21 @@ defaults::defaults()
     KVIKIO_EXPECT(capacity >= line_size,
                   "KVIKIO_HOST_CACHE_CAPACITY must hold at least one line",
                   std::invalid_argument);
-    _host_cache_capacity    = capacity;
-    _host_cache_line_size   = line_size;
-    _host_cache_max_io_size = max_io;
+    KVIKIO_EXPECT(region_size >= line_size && region_size % line_size == 0,
+                  "KVIKIO_HOST_CACHE_REGION_SIZE must contain a whole number of cache lines",
+                  std::invalid_argument);
+    KVIKIO_EXPECT(admission_threshold > 0 && admission_threshold <= 255,
+                  "KVIKIO_HOST_CACHE_ADMISSION_THRESHOLD must be in [1, 255]",
+                  std::invalid_argument);
+    KVIKIO_EXPECT(max_regions > 0,
+                  "KVIKIO_HOST_CACHE_MAX_REGIONS must be positive",
+                  std::invalid_argument);
+    _host_cache_capacity            = capacity;
+    _host_cache_line_size           = line_size;
+    _host_cache_max_io_size         = max_io;
+    _host_cache_region_size         = region_size;
+    _host_cache_admission_threshold = admission_threshold;
+    _host_cache_max_regions         = max_regions;
   }
   // Request shaping is experimental and opt-in.
   {
@@ -282,6 +298,40 @@ void defaults::set_host_cache_max_io_size(std::size_t nbytes)
                 "host cache max I/O size must be in (0, line size]",
                 std::invalid_argument);
   instance()->_host_cache_max_io_size = nbytes;
+}
+
+std::size_t defaults::host_cache_region_size() { return instance()->_host_cache_region_size; }
+
+void defaults::set_host_cache_region_size(std::size_t nbytes)
+{
+  auto const line_size = host_cache_line_size();
+  KVIKIO_EXPECT(nbytes >= line_size && nbytes % line_size == 0,
+                "host cache region size must contain a whole number of cache lines",
+                std::invalid_argument);
+  instance()->_host_cache_region_size = nbytes;
+}
+
+std::size_t defaults::host_cache_admission_threshold()
+{
+  return instance()->_host_cache_admission_threshold;
+}
+
+void defaults::set_host_cache_admission_threshold(std::size_t accesses)
+{
+  KVIKIO_EXPECT(accesses > 0 && accesses <= 255,
+                "host cache admission threshold must be in [1, 255]",
+                std::invalid_argument);
+  instance()->_host_cache_admission_threshold = accesses;
+}
+
+std::size_t defaults::host_cache_max_regions() { return instance()->_host_cache_max_regions; }
+
+void defaults::set_host_cache_max_regions(std::size_t regions)
+{
+  KVIKIO_EXPECT(regions > 0,
+                "host cache max regions must be positive",
+                std::invalid_argument);
+  instance()->_host_cache_max_regions = regions;
 }
 
 std::size_t defaults::http_max_attempts() { return instance()->_http_max_attempts; }

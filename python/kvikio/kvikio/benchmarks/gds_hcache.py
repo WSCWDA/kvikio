@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Single-case benchmark for the KvikIO GDS host-cache MVP.
+"""Single-case benchmark for the KvikIO region-admitted host cache.
 
 This benchmark intentionally measures a narrow workload:
 
@@ -88,6 +88,11 @@ def _configure(args: argparse.Namespace) -> None:
     kvikio.defaults.set("host_cache_capacity", args.cache_bytes)
     kvikio.defaults.set("host_cache_line_size", args.line_size)
     kvikio.defaults.set("host_cache_max_io_size", args.host_max)
+    kvikio.defaults.set("host_cache_region_size", args.region_size)
+    kvikio.defaults.set(
+        "host_cache_admission_threshold", args.admission_threshold
+    )
+    kvikio.defaults.set("host_cache_max_regions", args.max_regions)
 
 
 def _stats_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
@@ -109,6 +114,12 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("host-max must be <= line-size")
     if args.cache_bytes < args.line_size:
         raise ValueError("cache-bytes must hold at least one cache line")
+    if args.region_size < args.line_size or args.region_size % args.line_size:
+        raise ValueError("region-size must be a multiple of line-size")
+    if not 1 <= args.admission_threshold <= 255:
+        raise ValueError("admission-threshold must be in [1, 255]")
+    if args.max_regions <= 0:
+        raise ValueError("max-regions must be positive")
     if file_size < args.line_size:
         raise ValueError("file must be at least one cache line")
 
@@ -134,8 +145,13 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         if args.path == "hcache" and args.warmup:
             seen_lines = sorted({offset // args.line_size for offset in offsets})
             warm_buf = cupy.empty(args.io_size, dtype="uint8")
-            for line in seen_lines:
-                f.pread(warm_buf, size=args.io_size, file_offset=line * args.line_size).get()
+            for _ in range(args.admission_threshold):
+                for line in seen_lines:
+                    f.pread(
+                        warm_buf,
+                        size=args.io_size,
+                        file_offset=line * args.line_size,
+                    ).get()
             cupy.cuda.Stream.null.synchronize()
 
         before = f.host_cache_stats()
@@ -163,6 +179,9 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         "io_size": args.io_size,
         "line_size": args.line_size,
         "host_max": args.host_max,
+        "region_size": args.region_size,
+        "admission_threshold": args.admission_threshold,
+        "max_regions": args.max_regions,
         "cache_bytes": args.cache_bytes,
         "hot_bytes": args.hot_bytes,
         "requests": args.requests,
@@ -175,9 +194,12 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         "hit_rate": hit_rate,
         "stats": stats,
     }
-    if misses:
-        result["read_amplification_vs_request"] = stats.get("storage_bytes", 0) / (
-            misses * args.io_size
+    physical_storage_bytes = stats.get("storage_bytes", 0) + stats.get(
+        "admission_bypass_bytes", 0
+    )
+    if args.path == "hcache":
+        result["read_amplification_vs_request"] = (
+            physical_storage_bytes / logical_bytes
         )
     else:
         result["read_amplification_vs_request"] = None
@@ -191,6 +213,9 @@ def main() -> None:
     parser.add_argument("--io-size", type=_parse_size, default=4096)
     parser.add_argument("--line-size", type=_parse_size, default=64 * 1024)
     parser.add_argument("--host-max", type=_parse_size, default=64 * 1024)
+    parser.add_argument("--region-size", type=_parse_size, default=1024**2)
+    parser.add_argument("--admission-threshold", type=int, default=2)
+    parser.add_argument("--max-regions", type=int, default=4096)
     parser.add_argument("--cache-bytes", type=_parse_size, default=1024**3)
     parser.add_argument("--hot-bytes", type=_parse_size, default=64 * 1024**2)
     parser.add_argument("--requests", type=int, default=100_000)

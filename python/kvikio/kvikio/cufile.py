@@ -107,7 +107,7 @@ class CuFile:
         return self._handle.open_flags(o_direct)
 
     def host_cache_stats(self) -> dict[str, int]:
-        """Return hit, miss, eviction, storage-read and H2D byte counters."""
+        """Return host-cache data and region-admission counters."""
         return self._handle.host_cache_stats()
 
     def io_context(self) -> dict:

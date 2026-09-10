@@ -58,6 +58,9 @@ class ConfigContextManager:
             "host_cache_capacity",
             "host_cache_line_size",
             "host_cache_max_io_size",
+            "host_cache_region_size",
+            "host_cache_admission_threshold",
+            "host_cache_max_regions",
             "http_max_attempts",
             "http_status_codes",
             "http_timeout",
@@ -133,6 +136,9 @@ def set(*config) -> ConfigContextManager:
         - ``"host_cache_capacity"``
         - ``"host_cache_line_size"``
         - ``"host_cache_max_io_size"``
+        - ``"host_cache_region_size"``
+        - ``"host_cache_admission_threshold"``
+        - ``"host_cache_max_regions"``
         - ``"http_max_attempts"``
         - ``"http_status_codes"``
         - ``"http_timeout"``
@@ -184,6 +190,9 @@ def get(config_name: str) -> Any:
         - ``"host_cache_capacity"``
         - ``"host_cache_line_size"``
         - ``"host_cache_max_io_size"``
+        - ``"host_cache_region_size"``
+        - ``"host_cache_admission_threshold"``
+        - ``"host_cache_max_regions"``
         - ``"http_max_attempts"``
         - ``"http_status_codes"``
         - ``"http_timeout"``

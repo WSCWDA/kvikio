@@ -20,6 +20,9 @@ RAW_FIELDS = [
     "path",
     "io_size",
     "line_size",
+    "region_size",
+    "admission_threshold",
+    "max_regions",
     "cache_bytes",
     "hot_bytes",
     "requests",
@@ -33,6 +36,11 @@ RAW_FIELDS = [
     "evictions",
     "storage_bytes",
     "h2d_bytes",
+    "admitted_regions",
+    "admission_bypasses",
+    "admission_bypass_bytes",
+    "metadata_evictions",
+    "tracked_regions",
     "read_amplification_vs_request",
 ]
 
@@ -42,7 +50,18 @@ def _row(path: Path) -> dict[str, Any]:
     stats = data.get("stats", {})
     row = {field: data.get(field) for field in RAW_FIELDS}
     row["case"] = path.stem
-    for key in ["hits", "misses", "evictions", "storage_bytes", "h2d_bytes"]:
+    for key in [
+        "hits",
+        "misses",
+        "evictions",
+        "storage_bytes",
+        "h2d_bytes",
+        "admitted_regions",
+        "admission_bypasses",
+        "admission_bypass_bytes",
+        "metadata_evictions",
+        "tracked_regions",
+    ]:
         row[key] = stats.get(key, 0)
     return row
 
@@ -52,6 +71,9 @@ def _summary_key(row: dict[str, Any]) -> tuple[Any, ...]:
         row["path"],
         row["io_size"],
         row["line_size"],
+        row["region_size"],
+        row["admission_threshold"],
+        row["max_regions"],
         row["cache_bytes"],
         row["hot_bytes"],
     )
@@ -83,7 +105,16 @@ def main() -> None:
 
     summary_rows: list[dict[str, Any]] = []
     for key, group in sorted(groups.items()):
-        path, io_size, line_size, cache_bytes, hot_bytes = key
+        (
+            path,
+            io_size,
+            line_size,
+            region_size,
+            admission_threshold,
+            max_regions,
+            cache_bytes,
+            hot_bytes,
+        ) = key
         iops_values = [float(row["iops"]) for row in group]
         mib_values = [float(row["mib_per_s"]) for row in group]
         hit_values = [
@@ -94,6 +125,9 @@ def main() -> None:
                 "path": path,
                 "io_size": io_size,
                 "line_size": line_size,
+                "region_size": region_size,
+                "admission_threshold": admission_threshold,
+                "max_regions": max_regions,
                 "cache_bytes": cache_bytes,
                 "hot_bytes": hot_bytes,
                 "runs": len(group),
@@ -113,6 +147,15 @@ def main() -> None:
                 "storage_bytes_mean": statistics.mean(
                     float(row["storage_bytes"]) for row in group
                 ),
+                "admitted_regions_mean": statistics.mean(
+                    float(row["admitted_regions"]) for row in group
+                ),
+                "admission_bypasses_mean": statistics.mean(
+                    float(row["admission_bypasses"]) for row in group
+                ),
+                "metadata_evictions_mean": statistics.mean(
+                    float(row["metadata_evictions"]) for row in group
+                ),
             }
         )
 
@@ -123,6 +166,9 @@ def main() -> None:
             "path",
             "io_size",
             "line_size",
+            "region_size",
+            "admission_threshold",
+            "max_regions",
             "cache_bytes",
             "hot_bytes",
             "runs",
@@ -134,6 +180,9 @@ def main() -> None:
             "misses_mean",
             "evictions_mean",
             "storage_bytes_mean",
+            "admitted_regions_mean",
+            "admission_bypasses_mean",
+            "metadata_evictions_mean",
         ],
     )
     print(f"Wrote {raw_out}")

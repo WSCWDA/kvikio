@@ -48,6 +48,18 @@ cdef extern from "<kvikio/defaults.hpp>" namespace "kvikio" nogil:
         "kvikio::defaults::host_cache_max_io_size"() except +
     void cpp_set_host_cache_max_io_size \
         "kvikio::defaults::set_host_cache_max_io_size"(size_t nbytes) except +
+    size_t cpp_host_cache_region_size \
+        "kvikio::defaults::host_cache_region_size"() except +
+    void cpp_set_host_cache_region_size \
+        "kvikio::defaults::set_host_cache_region_size"(size_t nbytes) except +
+    size_t cpp_host_cache_admission_threshold \
+        "kvikio::defaults::host_cache_admission_threshold"() except +
+    void cpp_set_host_cache_admission_threshold \
+        "kvikio::defaults::set_host_cache_admission_threshold"(size_t accesses) except +
+    size_t cpp_host_cache_max_regions \
+        "kvikio::defaults::host_cache_max_regions"() except +
+    void cpp_set_host_cache_max_regions \
+        "kvikio::defaults::set_host_cache_max_regions"(size_t regions) except +
     size_t cpp_http_max_attempts "kvikio::defaults::http_max_attempts"() except +
     void cpp_set_http_max_attempts \
         "kvikio::defaults::set_http_max_attempts"(size_t attempts) except +
@@ -178,6 +190,30 @@ def host_cache_max_io_size() -> int:
 
 def set_host_cache_max_io_size(nbytes: int) -> None:
     cpp_set_host_cache_max_io_size(nbytes)
+
+
+def host_cache_region_size() -> int:
+    return cpp_host_cache_region_size()
+
+
+def set_host_cache_region_size(nbytes: int) -> None:
+    cpp_set_host_cache_region_size(nbytes)
+
+
+def host_cache_admission_threshold() -> int:
+    return cpp_host_cache_admission_threshold()
+
+
+def set_host_cache_admission_threshold(accesses: int) -> None:
+    cpp_set_host_cache_admission_threshold(accesses)
+
+
+def host_cache_max_regions() -> int:
+    return cpp_host_cache_max_regions()
+
+
+def set_host_cache_max_regions(regions: int) -> None:
+    cpp_set_host_cache_max_regions(regions)
 
 
 def http_max_attempts() -> int:

@@ -1,8 +1,9 @@
 # KvikIO GDS-HCache MVP 使用说明
 
-这版改动给 `CuFile` 增加了一个**每文件句柄独立**的小读缓存。第一次读取某个 64 KiB
-缓存行时，KvikIO 通过现有 POSIX/O_DIRECT 路径把整行读入页对齐的 CUDA 页锁定内存；后续命中
-同一行时只做 Host-to-Device 拷贝，不再访问 SSD。
+这版改动给 `CuFile` 增加了一个**每文件句柄独立**的小读缓存和有界区域准入器。准入器以
+1 MiB region 聚合多个 cache line，但只把同一 cache line 的重复访问视为复用证据，避免把顺序
+扫描同一区域内的不同 cache line 误判为热点。默认第二次访问某个 cache line 时提升其所在
+region；此后该 region 中符合条件的 cache-line miss 才能插入 Host Cache。
 
 ## 构建安装
 
@@ -29,6 +30,9 @@ export KVIKIO_HOST_CACHE=ON
 export KVIKIO_HOST_CACHE_CAPACITY=$((1024 * 1024 * 1024))
 export KVIKIO_HOST_CACHE_LINE_SIZE=$((64 * 1024))
 export KVIKIO_HOST_CACHE_MAX_IO_SIZE=$((64 * 1024))
+export KVIKIO_HOST_CACHE_REGION_SIZE=$((1024 * 1024))
+export KVIKIO_HOST_CACHE_ADMISSION_THRESHOLD=2
+export KVIKIO_HOST_CACHE_MAX_REGIONS=4096
 ```
 
 也可以在 Python 中配置，然后再打开文件：
@@ -41,6 +45,9 @@ kvikio.defaults.set({
     "host_cache_capacity": 1024 * 1024 * 1024,
     "host_cache_line_size": 64 * 1024,
     "host_cache_max_io_size": 64 * 1024,
+    "host_cache_region_size": 1024 * 1024,
+    "host_cache_admission_threshold": 2,
+    "host_cache_max_regions": 4096,
 })
 
 f = kvikio.CuFile("/mnt/gds/test.bin", "r")
@@ -48,9 +55,21 @@ f = kvikio.CuFile("/mnt/gds/test.bin", "r")
 print(f.host_cache_stats())
 ```
 
-统计字段含义：`hits` 为缓存命中次数，`misses` 为需要读存储的次数，`evictions` 为 LRU
-淘汰次数，`storage_bytes` 为实际从文件读入缓存的字节数，`h2d_bytes` 为缓存拷贝到 GPU 的
-字节数。
+统计字段含义：`hits` 和 `misses` 为 cache-line 查找结果；`admitted_regions` 为得到重复
+证据并被提升的 region 数；`admission_bypasses` 和 `admission_bypass_bytes` 为准入前绕过缓存
+的请求数和字节数；`metadata_evictions` 为有界 region metadata 的 LRU 淘汰次数；
+`storage_bytes` 为实际从文件读入缓存的字节数，`h2d_bytes` 为缓存拷贝到 GPU 的字节数。
+
+## Region-level Admission
+
+一次请求首先查找目标 cache line。命中时直接 H2D；未命中时，准入器按文件偏移计算 region
+和 region 内的 cache-line 编号，并递增该 line 的饱和访问计数。计数未达到阈值时返回
+`BYPASS`，由 `FileHandle` 当前选定的主路径完成本次读取，不分配缓存存储或 cache slot。计数达到
+阈值后提升整个 region，后续该 region 的 cache-line miss 可以插入缓存。
+
+Region metadata 使用独立 LRU，默认最多跟踪 4096 个 region。它与数据缓存 LRU 分离：前者
+回答“这个 region 是否值得缓存”，后者回答“缓存满时淘汰哪一个 cache line”。写入或显式调用
+`clear_host_cache()` 时，两类当前状态同时失效，但累计统计计数保留。
 
 ## MVP 边界
 
@@ -70,9 +89,10 @@ print(f.host_cache_stats())
 - `SEQUENTIAL_SCAN`：顺序比例不低于 75%，且平均 I/O 不小于 64 KiB；使用 GPU-direct，
   绕过 Host Cache。
 - `REUSE_DOMINATED`：重复区域比例不低于 25%，且平均 I/O 不大于 64 KiB；使用
-  Host-mediated 路径，并在 HCache 可用时准入缓存。
+  Host-mediated 路径，并在 HCache 可用时启用 region admission。
 - `FINE_GRAINED`：不满足复用条件的平均小于 64 KiB 的请求；使用 Host-mediated 路径，
-  但不准入 HCache。
+  在 HCache 可用时仍交给 region admission 做最终判断。这里 `ADMIT` 表示允许检查 region，
+  并不表示无条件缓存；一次性扫描仍会被拒绝。
 - `GENERAL`：其余大粒度或混合请求；默认使用 GPU-direct，并绕过 HCache。
 
 文件大小没有作为 `SMALL_FILE` 或 `LARGE_FILE` 枚举值，因为它与访问顺序、请求粒度和复用
@@ -111,6 +131,7 @@ scripts/run_gds_hcache_matrix.sh \
 - I/O size：`4 KiB`、`16 KiB`、`64 KiB`
 - HCache line size：`64 KiB`、`256 KiB`
 - HCache capacity：`16 MiB`、`32 MiB`、`64 MiB`、`128 MiB`
+- Admission threshold：`1`（cache-all 基线）、`2`（region admission）
 - Hot set：默认 `64 MiB`
 - Baseline：GDS no-cache、POSIX no-cache
 

@@ -4,7 +4,9 @@
  */
 
 #include <algorithm>
+#include <cstdint>
 #include <list>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <unordered_map>
@@ -20,6 +22,110 @@
 
 namespace kvikio::detail {
 
+class RegionAdmission::Impl {
+ public:
+  struct Entry {
+    Entry(std::size_t lines_per_region, std::list<std::size_t>::iterator lru)
+      : line_accesses(lines_per_region), lru{lru}
+    {
+    }
+
+    std::vector<std::uint8_t> line_accesses;
+    bool admitted{};
+    std::list<std::size_t>::iterator lru;
+  };
+
+  Impl(std::size_t region_size,
+       std::size_t line_size,
+       std::size_t admission_threshold,
+       std::size_t max_regions)
+    : region_size{region_size},
+      line_size{line_size},
+      lines_per_region{line_size == 0 ? 0 : region_size / line_size},
+      admission_threshold{admission_threshold},
+      max_regions{max_regions}
+  {
+    KVIKIO_EXPECT(line_size > 0 && region_size >= line_size && region_size % line_size == 0,
+                  "region size must contain a whole number of cache lines",
+                  std::invalid_argument);
+    KVIKIO_EXPECT(admission_threshold > 0 && admission_threshold <= 255,
+                  "region admission threshold must be in [1, 255]",
+                  std::invalid_argument);
+    KVIKIO_EXPECT(max_regions > 0,
+                  "region admission metadata capacity must be positive",
+                  std::invalid_argument);
+  }
+
+  std::size_t region_size;
+  std::size_t line_size;
+  std::size_t lines_per_region;
+  std::size_t admission_threshold;
+  std::size_t max_regions;
+  mutable std::mutex mutex;
+  std::unordered_map<std::size_t, Entry> entries;
+  std::list<std::size_t> lru;
+  RegionAdmissionStats counters{};
+};
+
+RegionAdmission::RegionAdmission(std::size_t region_size,
+                                 std::size_t line_size,
+                                 std::size_t admission_threshold,
+                                 std::size_t max_regions)
+  : _impl{std::make_unique<Impl>(region_size, line_size, admission_threshold, max_regions)}
+{
+}
+
+RegionAdmission::~RegionAdmission() noexcept = default;
+
+bool RegionAdmission::should_admit(std::size_t file_offset)
+{
+  std::lock_guard lock{_impl->mutex};
+  auto const region = file_offset / _impl->region_size;
+  auto found        = _impl->entries.find(region);
+  if (found == _impl->entries.end()) {
+    if (_impl->entries.size() == _impl->max_regions) {
+      auto const victim = _impl->lru.back();
+      _impl->entries.erase(victim);
+      _impl->lru.pop_back();
+      ++_impl->counters.metadata_evictions;
+    }
+    _impl->lru.push_front(region);
+    found = _impl->entries.try_emplace(region, _impl->lines_per_region, _impl->lru.begin()).first;
+  } else {
+    _impl->lru.splice(_impl->lru.begin(), _impl->lru, found->second.lru);
+    found->second.lru = _impl->lru.begin();
+  }
+
+  auto& entry = found->second;
+  if (!entry.admitted) {
+    auto const line = (file_offset % _impl->region_size) / _impl->line_size;
+    auto& accesses  = entry.line_accesses[line];
+    if (accesses < std::numeric_limits<std::uint8_t>::max()) { ++accesses; }
+    if (accesses >= _impl->admission_threshold) {
+      entry.admitted = true;
+      ++_impl->counters.admitted_regions;
+    }
+  }
+
+  if (!entry.admitted) { ++_impl->counters.bypassed_requests; }
+  return entry.admitted;
+}
+
+void RegionAdmission::clear() noexcept
+{
+  std::lock_guard lock{_impl->mutex};
+  _impl->entries.clear();
+  _impl->lru.clear();
+}
+
+RegionAdmissionStats RegionAdmission::stats() const noexcept
+{
+  std::lock_guard lock{_impl->mutex};
+  auto ret            = _impl->counters;
+  ret.tracked_regions = _impl->entries.size();
+  return ret;
+}
+
 class HostCache::Impl {
  public:
   struct Entry {
@@ -28,10 +134,16 @@ class HostCache::Impl {
     std::list<std::size_t>::iterator lru;
   };
 
-  Impl(std::size_t capacity, std::size_t line_size, std::size_t max_io_size)
-    : capacity{capacity - capacity % line_size},
+  Impl(std::size_t capacity,
+       std::size_t line_size,
+       std::size_t max_io_size,
+       std::size_t region_size,
+       std::size_t admission_threshold,
+       std::size_t max_regions)
+    : capacity{line_size == 0 ? 0 : capacity - capacity % line_size},
       line_size{line_size},
-      max_io_size{max_io_size}
+      max_io_size{max_io_size},
+      admission{region_size, line_size, admission_threshold, max_regions}
   {
     KVIKIO_EXPECT(this->capacity >= line_size,
                   "host cache capacity must hold at least one cache line",
@@ -64,6 +176,7 @@ class HostCache::Impl {
   std::size_t capacity;
   std::size_t line_size;
   std::size_t max_io_size;
+  RegionAdmission admission;
   mutable std::mutex mutex;
   CudaPageAlignedPinnedAllocator allocator;
   void* storage{};
@@ -75,8 +188,14 @@ class HostCache::Impl {
   HostCacheStats counters{};
 };
 
-HostCache::HostCache(std::size_t capacity, std::size_t line_size, std::size_t max_io_size)
-  : _impl{std::make_unique<Impl>(capacity, line_size, max_io_size)}
+HostCache::HostCache(std::size_t capacity,
+                     std::size_t line_size,
+                     std::size_t max_io_size,
+                     std::size_t region_size,
+                     std::size_t admission_threshold,
+                     std::size_t max_regions)
+  : _impl{std::make_unique<Impl>(
+      capacity, line_size, max_io_size, region_size, admission_threshold, max_regions)}
 {
 }
 
@@ -100,7 +219,6 @@ std::optional<std::size_t> HostCache::read(int fd_direct_off,
 
   std::lock_guard lock{_impl->mutex};
   _impl->active_device_pointer = dev_ptr_base;
-  _impl->ensure_storage();
 
   auto const line_offset = file_offset - file_offset % _impl->line_size;
   auto const in_line      = file_offset - line_offset;
@@ -108,6 +226,11 @@ std::optional<std::size_t> HostCache::read(int fd_direct_off,
 
   if (found == _impl->entries.end()) {
     ++_impl->counters.misses;
+    if (!_impl->admission.should_admit(file_offset)) {
+      _impl->counters.admission_bypass_bytes += size;
+      return std::nullopt;
+    }
+    _impl->ensure_storage();
     if (_impl->free_slots.empty()) {
       auto const victim = _impl->lru.back();
       auto const entry  = _impl->entries.find(victim);
@@ -166,12 +289,19 @@ void HostCache::clear() noexcept
   for (std::size_t i = 0; i < _impl->capacity / _impl->line_size; ++i) {
     _impl->free_slots.push_back(_impl->capacity / _impl->line_size - 1 - i);
   }
+  _impl->admission.clear();
 }
 
 HostCacheStats HostCache::stats() const noexcept
 {
   std::lock_guard lock{_impl->mutex};
-  return _impl->counters;
+  auto ret                 = _impl->counters;
+  auto const admission     = _impl->admission.stats();
+  ret.admitted_regions     = admission.admitted_regions;
+  ret.admission_bypasses   = admission.bypassed_requests;
+  ret.metadata_evictions   = admission.metadata_evictions;
+  ret.tracked_regions      = admission.tracked_regions;
+  return ret;
 }
 
 }  // namespace kvikio::detail

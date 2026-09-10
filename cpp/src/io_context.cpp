@@ -132,7 +132,10 @@ void IOContext::classify() noexcept
   } else if (average_size < io_size_threshold) {
     _workload.store(WorkloadClass::FINE_GRAINED, std::memory_order_relaxed);
     _path.store(IOPath::HOST_MEDIATED, std::memory_order_relaxed);
-    _cache.store(CachePolicy::BYPASS, std::memory_order_relaxed);
+    // ADMIT means "consult region admission", not "cache every request". Cold scans are still
+    // rejected by RegionAdmission, while spatially reused lines remain eligible after profiling.
+    _cache.store(_host_cache_available ? CachePolicy::ADMIT : CachePolicy::BYPASS,
+                 std::memory_order_relaxed);
   } else {
     _workload.store(WorkloadClass::GENERAL, std::memory_order_relaxed);
     _path.store(IOPath::GPU_DIRECT, std::memory_order_relaxed);

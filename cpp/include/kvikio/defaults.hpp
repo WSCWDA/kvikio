@@ -121,6 +121,9 @@ class defaults {
   std::size_t _host_cache_capacity;
   std::size_t _host_cache_line_size;
   std::size_t _host_cache_max_io_size;
+  std::size_t _host_cache_region_size;
+  std::size_t _host_cache_admission_threshold;
+  std::size_t _host_cache_max_regions;
   std::size_t _http_max_attempts;
   long _http_timeout;
   std::vector<int> _http_status_codes;
@@ -331,6 +334,18 @@ class defaults {
   /** @brief Maximum individual read routed through the host cache. */
   [[nodiscard]] static std::size_t host_cache_max_io_size();
   static void set_host_cache_max_io_size(std::size_t nbytes);
+
+  /** @brief Region size used by host-cache admission. */
+  [[nodiscard]] static std::size_t host_cache_region_size();
+  static void set_host_cache_region_size(std::size_t nbytes);
+
+  /** @brief Repeated accesses to one cache line required to admit its region. */
+  [[nodiscard]] static std::size_t host_cache_admission_threshold();
+  static void set_host_cache_admission_threshold(std::size_t accesses);
+
+  /** @brief Maximum number of regions retained by the admission metadata table. */
+  [[nodiscard]] static std::size_t host_cache_max_regions();
+  static void set_host_cache_max_regions(std::size_t regions);
 
   /**
    * @brief Get the maximum number of attempts per remote IO read.

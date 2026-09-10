@@ -190,12 +190,16 @@ def test_io_context_repeated_reads(tmp_path):
         "host_cache_capacity": 1024 * 1024,
         "host_cache_line_size": 64 * 1024,
         "host_cache_max_io_size": 64 * 1024,
+        "host_cache_region_size": 4 * 64 * 1024,
+        "host_cache_admission_threshold": 2,
+        "host_cache_max_regions": 128,
     }
     with kvikio.defaults.set(settings):
         with kvikio.CuFile(filename, "r") as f:
             for _ in range(64):
                 assert f.raw_read(out, size=4096, file_offset=0) == 4096
             context = f.io_context()
+            cache_stats = f.host_cache_stats()
 
     assert context["profile_complete"]
     assert context["request_count"] == 64
@@ -203,6 +207,47 @@ def test_io_context_repeated_reads(tmp_path):
     assert context["path"] == "HOST_MEDIATED"
     assert context["cache"] == "ADMIT"
     assert context["submit"] == "DIRECT"
+    assert cache_stats["admitted_regions"] == 1
+    assert cache_stats["admission_bypasses"] == 1
+    assert cache_stats["admission_bypass_bytes"] == 4096
+    assert cache_stats["misses"] == 2
+    assert cache_stats["hits"] == 62
+
+
+def test_host_cache_does_not_admit_sequential_lines(tmp_path):
+    """One-pass accesses to different lines do not promote their common region."""
+    filename = tmp_path / "test-file"
+    line_size = 64 * 1024
+    line_count = 64
+    numpy.arange(line_count * line_size, dtype=numpy.uint8).tofile(filename)
+    out = cupy.empty(4096, dtype=cupy.uint8)
+
+    settings = {
+        "host_cache_enabled": True,
+        "host_cache_capacity": 4 * line_size,
+        "host_cache_line_size": line_size,
+        "host_cache_max_io_size": 4096,
+        "host_cache_region_size": line_count * line_size,
+        "host_cache_admission_threshold": 2,
+        "host_cache_max_regions": 128,
+    }
+    with kvikio.defaults.set(settings):
+        with kvikio.CuFile(filename, "r") as f:
+            for line in range(line_count):
+                assert f.raw_read(
+                    out, size=4096, file_offset=line * line_size
+                ) == 4096
+            stats = f.host_cache_stats()
+            context = f.io_context()
+
+    assert context["profile_complete"]
+    assert context["path"] == "HOST_MEDIATED"
+    assert context["cache"] == "ADMIT"
+    assert stats["admitted_regions"] == 0
+    assert stats["admission_bypasses"] == line_count
+    assert stats["admission_bypass_bytes"] == line_count * 4096
+    assert stats["tracked_regions"] == 1
+    assert stats["storage_bytes"] == 0
 
 
 @pytest.mark.parametrize(

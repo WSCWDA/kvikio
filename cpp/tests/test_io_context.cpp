@@ -41,7 +41,7 @@ TEST(IOContextTest, repeated_small_reads_select_host_cache)
   EXPECT_GT(snapshot.stats.repeated_region_ratio, 0.9);
 }
 
-TEST(IOContextTest, cold_small_reads_select_host_without_admission)
+TEST(IOContextTest, cold_small_reads_delegate_to_region_admission)
 {
   kvikio::IOContext context{true};
   constexpr std::size_t size = 4 * 1024;
@@ -52,7 +52,8 @@ TEST(IOContextTest, cold_small_reads_select_host_without_admission)
   auto const snapshot = context.snapshot();
   EXPECT_EQ(snapshot.workload, kvikio::WorkloadClass::FINE_GRAINED);
   EXPECT_EQ(snapshot.policy.path, kvikio::IOPath::HOST_MEDIATED);
-  EXPECT_EQ(snapshot.policy.cache, kvikio::CachePolicy::BYPASS);
+  // ADMIT delegates the final decision to RegionAdmission; it does not cache every request.
+  EXPECT_EQ(snapshot.policy.cache, kvikio::CachePolicy::ADMIT);
 }
 
 TEST(IOContextTest, general_large_random_reads_select_gds)
