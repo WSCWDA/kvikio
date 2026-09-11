@@ -250,6 +250,42 @@ def test_host_cache_does_not_admit_sequential_lines(tmp_path):
     assert stats["storage_bytes"] == 0
 
 
+def test_pread_observes_admission_once_per_logical_request(tmp_path):
+    """A pread cache miss is not observed again by its thread-pool task."""
+    filename = tmp_path / "test-file"
+    line_size = 64 * 1024
+    numpy.arange(line_size, dtype=numpy.uint8).tofile(filename)
+    out = cupy.empty(4096, dtype=cupy.uint8)
+
+    settings = {
+        "host_cache_enabled": True,
+        "host_cache_capacity": 4 * line_size,
+        "host_cache_line_size": line_size,
+        "host_cache_max_io_size": 4096,
+        "host_cache_region_size": 4 * line_size,
+        "host_cache_admission_threshold": 2,
+        "host_cache_max_regions": 128,
+    }
+    with kvikio.defaults.set(settings):
+        with kvikio.CuFile(filename, "r") as f:
+            assert f.pread(out, size=4096, task_size=4096).get() == 4096
+            after_first = f.host_cache_stats()
+            assert f.pread(out, size=4096, task_size=4096).get() == 4096
+            after_second = f.host_cache_stats()
+            assert f.pread(out, size=4096, task_size=4096).get() == 4096
+            after_third = f.host_cache_stats()
+
+    assert after_first["admitted_regions"] == 0
+    assert after_first["admission_bypasses"] == 1
+    assert after_first["misses"] == 1
+    assert after_first["storage_bytes"] == 0
+    assert after_second["admitted_regions"] == 1
+    assert after_second["misses"] == 2
+    assert after_second["hits"] == 0
+    assert after_second["storage_bytes"] == line_size
+    assert after_third["hits"] == 1
+
+
 @pytest.mark.parametrize(
     "io_size,offsets,workload,path",
     [

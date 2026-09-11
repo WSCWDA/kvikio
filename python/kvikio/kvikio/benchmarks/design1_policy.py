@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import time
 from pathlib import Path
 from typing import Any
@@ -37,7 +38,12 @@ CASES: dict[str, dict[str, Any]] = {
 }
 
 
-def _offsets(case: str, count: int, io_size: int, file_size: int) -> list[int]:
+PROFILE_REQUESTS = 64
+REGION_SIZE = 1024 * 1024
+CACHE_LINE_SIZE = 64 * 1024
+
+
+def _profile_offsets(case: str, count: int, io_size: int, file_size: int) -> list[int]:
     usable = file_size - io_size - 4096
     if usable <= 0:
         raise ValueError("benchmark file is too small")
@@ -50,21 +56,60 @@ def _offsets(case: str, count: int, io_size: int, file_size: int) -> list[int]:
         # Each pair straddles a 1 MiB profiling-region boundary. Requests in a
         # pair are mergeable, while their starting offsets remain in distinct
         # regions so the pattern is not mislabeled as reuse-dominated.
-        region_size = 1024 * 1024
         pair_count = (count + 1) // 2
         offsets: list[int] = []
         for pair in range(pair_count):
-            first = (2 * pair + 1) * region_size - io_size + 3
+            first = (2 * pair + 1) * REGION_SIZE - io_size + 3
             offsets.extend((first, first + io_size))
         return [offset % usable for offset in offsets[:count]]
     # Visit distinct 1 MiB profiling regions in a deterministic permutation.
     # This makes random_cold_small cold at exactly the granularity used by
     # IOContext instead of relying on probabilistic random samples.
-    region_size = 1024 * 1024
-    regions = usable // region_size
-    if regions < 64:
+    regions = usable // REGION_SIZE
+    if regions < PROFILE_REQUESTS:
         raise ValueError("random_cold_small requires at least 64 usable MiB")
-    return [((i * 37) % regions) * region_size for i in range(count)]
+    return [((i * 37) % regions) * REGION_SIZE for i in range(count)]
+
+
+def _measurement_offsets(
+    case: str,
+    count: int,
+    io_size: int,
+    file_size: int,
+    batch_size: int,
+) -> list[int]:
+    usable = file_size - io_size - 4096
+    if case == "sequential_large":
+        return [(i * io_size) % usable for i in range(count)]
+    if case == "random_hot_small":
+        hot = [0, CACHE_LINE_SIZE]
+        return [hot[i % len(hot)] for i in range(count)]
+    if case == "random_cold_small":
+        lines = usable // CACHE_LINE_SIZE
+        if count > lines:
+            raise ValueError(
+                "random_cold_small needs one cache line per measured request: "
+                f"requests={count}, available_lines={lines}; enlarge --file or "
+                "reduce --requests"
+            )
+        # Sampling without replacement prevents accidental cache-line reuse.
+        return [
+            line * CACHE_LINE_SIZE
+            for line in random.Random(20260910).sample(range(lines), count)
+        ]
+    # Build complete adjacent bursts without wrapping in the middle of a batch.
+    cluster_span = batch_size * io_size
+    stride = max(REGION_SIZE, cluster_span + 4096)
+    max_base = file_size - cluster_span - 4096
+    if max_base <= 0:
+        raise ValueError("benchmark file is too small for one shaping batch")
+    offsets: list[int] = []
+    for begin in range(0, count, batch_size):
+        group_size = min(batch_size, count - begin)
+        batch_index = begin // batch_size
+        base = ((8 * REGION_SIZE + batch_index * stride) % max_base) + 3
+        offsets.extend(base + i * io_size for i in range(group_size))
+    return offsets
 
 
 def _submit_batched(
@@ -98,8 +143,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     case = CASES[args.case]
     io_size = int(case["io_size"])
     file_size = args.file.stat().st_size
-    profile_offsets = _offsets(args.case, 64, io_size, file_size)
-    measured_offsets = _offsets(args.case, args.requests, io_size, file_size)
+    profile_offsets = _profile_offsets(
+        args.case, PROFILE_REQUESTS, io_size, file_size
+    )
+    measured_offsets = _measurement_offsets(
+        args.case, args.requests, io_size, file_size, args.batch_size
+    )
 
     settings = {
         "compat_mode": kvikio.CompatMode.OFF,
@@ -108,9 +157,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "host_cache_enabled": True,
         "request_shaping_enabled": True,
         "host_cache_capacity": args.cache_bytes,
-        "host_cache_line_size": 64 * 1024,
-        "host_cache_max_io_size": 64 * 1024,
-        "host_cache_region_size": 1024 * 1024,
+        "host_cache_line_size": CACHE_LINE_SIZE,
+        "host_cache_max_io_size": CACHE_LINE_SIZE,
+        "host_cache_region_size": REGION_SIZE,
         "host_cache_admission_threshold": 2,
         "host_cache_max_regions": 4096,
     }
@@ -118,8 +167,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         with kvikio.CuFile(args.file, "r") as handle:
             _submit_batched(handle, profile_offsets, io_size, args.batch_size)
             selected = handle.io_context()
+            # Policy is retained, while cache contents and region-admission history
+            # from profiling are removed before workload measurement.
+            handle.clear_host_cache()
+            warmup_requests = 0
+            if args.case == "random_hot_small":
+                # Admit and populate both hot lines before starting the timer.
+                # Keep this trace independent of --requests so even a short
+                # smoke test has a complete warm-up phase.
+                warmup_offsets = [0, CACHE_LINE_SIZE, 0, CACHE_LINE_SIZE]
+                _submit_batched(handle, warmup_offsets, io_size, args.batch_size)
+                warmup_requests = len(warmup_offsets)
             before_cache = handle.host_cache_stats()
-            before_shaping = selected["shaping"]
+            before_shaping = handle.io_context()["shaping"]
             start = time.perf_counter()
             completed, latencies = _submit_batched(
                 handle, measured_offsets, io_size, args.batch_size
@@ -151,11 +211,32 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         key: context["shaping"][key] - before_shaping.get(key, 0)
         for key in context["shaping"]
     }
+    if args.case == "random_cold_small" and (
+        cache_delta.get("hits", 0) != 0
+        or cache_delta.get("admitted_regions", 0) != 0
+    ):
+        raise RuntimeError(
+            "random_cold_small unexpectedly reused or admitted cache data: "
+            f"{cache_delta}"
+        )
+    if args.case == "random_hot_small" and cache_delta.get("hits", 0) != args.requests:
+        raise RuntimeError(
+            "random_hot_small did not remain fully cached after warm-up: "
+            f"{cache_delta}"
+        )
+    if args.case == "adjacent_unaligned_small" and shaping_delta.get(
+        "physical_requests", args.requests
+    ) >= args.requests:
+        raise RuntimeError(
+            "adjacent_unaligned_small was not coalesced: " f"{shaping_delta}"
+        )
     ordered = sorted(latencies)
     percentile = lambda q: ordered[min(len(ordered) - 1, int(q * len(ordered)))]
     return {
         "case": args.case,
         "requests": args.requests,
+        "profile_requests": PROFILE_REQUESTS,
+        "warmup_requests": warmup_requests,
         "io_size": io_size,
         "batch_size": args.batch_size,
         "completed_bytes": completed,
@@ -178,7 +259,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--file", type=Path, required=True)
     parser.add_argument("--case", choices=CASES, required=True)
-    parser.add_argument("--requests", type=int, default=4096)
+    parser.add_argument("--requests", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--cache-bytes", type=int, default=256 * 1024**2)
     parser.add_argument("--output", type=Path)

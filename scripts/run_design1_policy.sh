@@ -7,7 +7,7 @@ REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PYTHON_BIN="${PYTHON_BIN:-python}"
 DESIGN1_FILE="${DESIGN1_FILE:?Set DESIGN1_FILE to an existing, non-sparse SSD file}"
 RESULT_ROOT="${RESULT_ROOT:-/tmp/groute-design1-policy}"
-REQUESTS="${REQUESTS:-4096}"
+REQUESTS="${REQUESTS:-1024}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 REPEATS="${REPEATS:-5}"
 CASES="${CASES:-sequential_large random_cold_small random_hot_small adjacent_unaligned_small}"
@@ -23,13 +23,25 @@ if [[ ! -f "${DESIGN1_FILE}" ]]; then
   echo "Missing benchmark file: ${DESIGN1_FILE}" >&2
   exit 2
 fi
-if (( $(stat -c %s "${DESIGN1_FILE}") < 134217728 )); then
-  echo "DESIGN1_FILE must be at least 128 MiB" >&2
+file_size=$(stat -c %s "${DESIGN1_FILE}")
+cold_required=$((REQUESTS * 65536 + 8192))
+minimum_size=$((128 * 1024 * 1024))
+if (( cold_required > minimum_size )); then
+  minimum_size=${cold_required}
+fi
+if (( file_size < minimum_size )); then
+  echo "DESIGN1_FILE is too small: need at least ${minimum_size} bytes for ${REQUESTS} cold requests" >&2
   exit 2
 fi
 
 mkdir -p "${RESULT_ROOT}"
-rm -f "${RESULT_ROOT}/failed_runs.txt"
+# Do not let JSON files from an older matrix contaminate the new summary.
+rm -f "${RESULT_ROOT}"/design1_*.json \
+      "${RESULT_ROOT}"/design1_*.json.tmp \
+      "${RESULT_ROOT}"/design1_*.log \
+      "${RESULT_ROOT}/raw_results.csv" \
+      "${RESULT_ROOT}/summary.csv" \
+      "${RESULT_ROOT}/failed_runs.txt"
 status=0
 
 for repeat in $(seq 1 "${REPEATS}"); do

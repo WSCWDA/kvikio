@@ -30,11 +30,16 @@ def main() -> None:
                 "path": policy["path"],
                 "cache": policy["cache"],
                 "submit": policy["submit"],
+                "profile_requests": data.get("profile_requests", 64),
+                "warmup_requests": data.get("warmup_requests", 0),
                 "iops": data["iops"],
                 "mib_per_second": data["logical_mib_per_second"],
                 "batch_p99_us": data["batch_latency_us"]["p99"],
                 "cache_hits": cache.get("hits", 0),
+                "cache_misses": cache.get("misses", 0),
                 "admitted_regions": cache.get("admitted_regions", 0),
+                "admission_bypasses": cache.get("admission_bypasses", 0),
+                "storage_bytes": cache.get("storage_bytes", 0),
                 "physical_requests": shaping.get("physical_requests", 0),
             }
         )
@@ -67,6 +72,15 @@ def main() -> None:
                 ),
                 "cache_hits_median": statistics.median(
                     int(x["cache_hits"]) for x in group
+                ),
+                "cache_misses_median": statistics.median(
+                    int(x["cache_misses"]) for x in group
+                ),
+                "admitted_regions_median": statistics.median(
+                    int(x["admitted_regions"]) for x in group
+                ),
+                "admission_bypasses_median": statistics.median(
+                    int(x["admission_bypasses"]) for x in group
                 ),
                 "physical_requests_median": statistics.median(
                     int(x["physical_requests"]) for x in group

@@ -232,10 +232,11 @@ std::size_t FileHandle::read_impl(void* devPtr_base,
                                   std::size_t size,
                                   std::size_t file_offset,
                                   std::size_t devPtr_offset,
-                                  bool sync_default_stream)
+                                  bool sync_default_stream,
+                                  bool consult_host_cache)
 {
   auto const policy = _io_context ? _io_context->policy() : IOPolicy{};
-  if (policy.cache == CachePolicy::ADMIT && _host_cache &&
+  if (consult_host_cache && policy.cache == CachePolicy::ADMIT && _host_cache &&
       _host_cache->eligible(size, file_offset)) {
     if (auto ret = _host_cache->read(_file_direct_off.fd(),
                                      _file_direct_on.fd(),
@@ -389,8 +390,14 @@ std::future<std::size_t> FileHandle::pread(void* buf,
                           std::size_t file_offset,
                           std::size_t devPtr_offset) -> std::size_t {
     PushAndPopContext c(ctx);
-    return read_impl(
-      devPtr_base, size, file_offset, devPtr_offset, /* sync_default_stream = */ false);
+    // pread() has already performed the one cache/admission lookup associated with this logical
+    // request. A miss must not be observed again when the physical task reaches read_impl().
+    return read_impl(devPtr_base,
+                     size,
+                     file_offset,
+                     devPtr_offset,
+                     /* sync_default_stream = */ false,
+                     /* consult_host_cache = */ false);
   };
   // When using the POSIX path (compat mode) with Direct I/O, shorten the first task so that
   // subsequent tasks start at a page-aligned file offset. This eliminates per-task unaligned

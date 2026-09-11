@@ -53,7 +53,8 @@ class FileHandle {
                         std::size_t size,
                         std::size_t file_offset,
                         std::size_t devPtr_offset,
-                        bool sync_default_stream);
+                        bool sync_default_stream,
+                        bool consult_host_cache = true);
 
  public:
   // 644 is a common setting of Unix file permissions: read and write for owner, read-only for group
