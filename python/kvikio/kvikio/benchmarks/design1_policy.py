@@ -14,6 +14,7 @@ from typing import Any
 import cupy
 
 import kvikio
+import kvikio.defaults
 
 
 CASES: dict[str, dict[str, Any]] = {
