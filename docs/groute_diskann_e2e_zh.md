@@ -92,3 +92,21 @@ G-Route最终选择的policy、cache和shaping统计。
 5. 扫描多个`EF_SEARCH`绘制Recall--QPS曲线；
 6. 同时报告所选policy、cache hit、physical requests与p99 I/O batch latency，解释
    性能来自路径选择、region cache还是request shaping。
+
+## 论文最终端到端矩阵
+
+最终结果不应只比较AIO与完整G-Route。至少包含以下配置：
+
+| 配置 | 目的 |
+|---|---|
+| GustANN AIO | Host-mediated应用基线 |
+| KvikIO GDS Direct | 固定GPU-direct基线 |
+| G-Route without shaping | 分离Design 2贡献 |
+| G-Route without Host Cache | 分离Design 3贡献 |
+| Full G-Route | 完整系统 |
+
+在SIFT1M上先验证正确性和集成，在至少一个索引大于Host DRAM的数据集上给出主要性能
+结果，避免Page Cache把AIO变成内存基线。对每个系统扫描`EF_SEARCH`，报告Recall--QPS
+曲线、端到端p50/p95/p99、page reads/query、逻辑与物理读取字节、CPU利用率和GPU利用率。
+如果BaM运行环境可用，可作为独立GPU-initiated系统报告，但不应把G-Route描述成对BaM
+路径的透明替换。

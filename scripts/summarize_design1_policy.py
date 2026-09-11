@@ -32,6 +32,13 @@ def main() -> None:
                 "submit": policy["submit"],
                 "profile_requests": data.get("profile_requests", 64),
                 "warmup_requests": data.get("warmup_requests", 0),
+                "warmup_admitted_regions": data.get(
+                    "warmup_admitted_regions", 0
+                ),
+                "warmup_storage_bytes": data.get("warmup_storage_bytes", 0),
+                "cache_entries_before_measurement": data.get(
+                    "cache_entries_before_measurement", 0
+                ),
                 "iops": data["iops"],
                 "mib_per_second": data["logical_mib_per_second"],
                 "batch_p99_us": data["batch_latency_us"]["p99"],
@@ -81,6 +88,15 @@ def main() -> None:
                 ),
                 "admission_bypasses_median": statistics.median(
                     int(x["admission_bypasses"]) for x in group
+                ),
+                "warmup_admitted_regions_median": statistics.median(
+                    int(x["warmup_admitted_regions"]) for x in group
+                ),
+                "warmup_storage_bytes_median": statistics.median(
+                    int(x["warmup_storage_bytes"]) for x in group
+                ),
+                "cache_entries_before_measurement_median": statistics.median(
+                    int(x["cache_entries_before_measurement"]) for x in group
                 ),
                 "physical_requests_median": statistics.median(
                     int(x["physical_requests"]) for x in group

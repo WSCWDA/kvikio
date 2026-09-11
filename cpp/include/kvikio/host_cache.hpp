@@ -13,7 +13,7 @@
 
 namespace kvikio {
 
-/** @brief Snapshot of per-file host-cache counters. */
+/** @brief Snapshot of per-file host-cache counters and current occupancy. */
 struct HostCacheStats {
   std::uint64_t hits{};
   std::uint64_t misses{};
@@ -25,6 +25,7 @@ struct HostCacheStats {
   std::uint64_t admission_bypass_bytes{};
   std::uint64_t metadata_evictions{};
   std::uint64_t tracked_regions{};
+  std::uint64_t cache_entries{};
 };
 
 namespace detail {

@@ -170,6 +170,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             # Policy is retained, while cache contents and region-admission history
             # from profiling are removed before workload measurement.
             handle.clear_host_cache()
+            after_reset_cache = handle.host_cache_stats()
             warmup_requests = 0
             if args.case == "random_hot_small":
                 # Admit and populate both hot lines before starting the timer.
@@ -179,6 +180,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 _submit_batched(handle, warmup_offsets, io_size, args.batch_size)
                 warmup_requests = len(warmup_offsets)
             before_cache = handle.host_cache_stats()
+            warmup_admitted_regions = (
+                before_cache["admitted_regions"]
+                - after_reset_cache["admitted_regions"]
+            )
+            warmup_storage_bytes = (
+                before_cache["storage_bytes"]
+                - after_reset_cache["storage_bytes"]
+            )
+            cache_entries_before_measurement = before_cache["cache_entries"]
             before_shaping = handle.io_context()["shaping"]
             start = time.perf_counter()
             completed, latencies = _submit_batched(
@@ -224,6 +234,28 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "random_hot_small did not remain fully cached after warm-up: "
             f"{cache_delta}"
         )
+    if args.case == "random_hot_small" and (
+        warmup_admitted_regions != 1
+        or warmup_storage_bytes != 2 * CACHE_LINE_SIZE
+        or cache_entries_before_measurement != 2
+    ):
+        raise RuntimeError(
+            "random_hot_small warm-up did not prepare the expected two-line cache: "
+            f"admitted_regions={warmup_admitted_regions}, "
+            f"storage_bytes={warmup_storage_bytes}, "
+            f"cache_entries={cache_entries_before_measurement}"
+        )
+    if args.case != "random_hot_small" and (
+        warmup_admitted_regions != 0
+        or warmup_storage_bytes != 0
+        or cache_entries_before_measurement != 0
+    ):
+        raise RuntimeError(
+            f"{args.case} unexpectedly retained cache state before measurement: "
+            f"admitted_regions={warmup_admitted_regions}, "
+            f"storage_bytes={warmup_storage_bytes}, "
+            f"cache_entries={cache_entries_before_measurement}"
+        )
     if args.case == "adjacent_unaligned_small" and shaping_delta.get(
         "physical_requests", args.requests
     ) >= args.requests:
@@ -237,6 +269,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "requests": args.requests,
         "profile_requests": PROFILE_REQUESTS,
         "warmup_requests": warmup_requests,
+        "warmup_admitted_regions": warmup_admitted_regions,
+        "warmup_storage_bytes": warmup_storage_bytes,
+        "cache_entries_before_measurement": cache_entries_before_measurement,
         "io_size": io_size,
         "batch_size": args.batch_size,
         "completed_bytes": completed,

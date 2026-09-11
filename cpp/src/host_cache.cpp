@@ -301,6 +301,7 @@ HostCacheStats HostCache::stats() const noexcept
   ret.admission_bypasses   = admission.bypassed_requests;
   ret.metadata_evictions   = admission.metadata_evictions;
   ret.tracked_regions      = admission.tracked_regions;
+  ret.cache_entries        = _impl->entries.size();
   return ret;
 }
 

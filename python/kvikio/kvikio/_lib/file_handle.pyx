@@ -87,6 +87,7 @@ cdef extern from "<kvikio/file_handle.hpp>" namespace "kvikio" nogil:
         uint64_t admission_bypass_bytes
         uint64_t metadata_evictions
         uint64_t tracked_regions
+        uint64_t cache_entries
 
     cdef cppclass RequestShaperStats:
         uint64_t logical_requests
@@ -213,6 +214,7 @@ cdef class CuFile:
             "admission_bypass_bytes": result.admission_bypass_bytes,
             "metadata_evictions": result.metadata_evictions,
             "tracked_regions": result.tracked_regions,
+            "cache_entries": result.cache_entries,
         }
 
     def io_context(self) -> dict:

@@ -212,6 +212,7 @@ def test_io_context_repeated_reads(tmp_path):
     assert cache_stats["admission_bypass_bytes"] == 4096
     assert cache_stats["misses"] == 2
     assert cache_stats["hits"] == 62
+    assert cache_stats["cache_entries"] == 1
 
 
 def test_host_cache_does_not_admit_sequential_lines(tmp_path):
@@ -248,6 +249,7 @@ def test_host_cache_does_not_admit_sequential_lines(tmp_path):
     assert stats["admission_bypass_bytes"] == line_count * 4096
     assert stats["tracked_regions"] == 1
     assert stats["storage_bytes"] == 0
+    assert stats["cache_entries"] == 0
 
 
 def test_pread_observes_admission_once_per_logical_request(tmp_path):
@@ -274,16 +276,24 @@ def test_pread_observes_admission_once_per_logical_request(tmp_path):
             after_second = f.host_cache_stats()
             assert f.pread(out, size=4096, task_size=4096).get() == 4096
             after_third = f.host_cache_stats()
+            f.clear_host_cache()
+            after_clear = f.host_cache_stats()
 
     assert after_first["admitted_regions"] == 0
     assert after_first["admission_bypasses"] == 1
     assert after_first["misses"] == 1
     assert after_first["storage_bytes"] == 0
+    assert after_first["cache_entries"] == 0
     assert after_second["admitted_regions"] == 1
     assert after_second["misses"] == 2
     assert after_second["hits"] == 0
     assert after_second["storage_bytes"] == line_size
+    assert after_second["cache_entries"] == 1
     assert after_third["hits"] == 1
+    assert after_third["cache_entries"] == 1
+    assert after_clear["cache_entries"] == 0
+    assert after_clear["tracked_regions"] == 0
+    assert after_clear["hits"] == after_third["hits"]
 
 
 @pytest.mark.parametrize(
