@@ -23,10 +23,28 @@ def main() -> None:
         policy = data["selected_policy"]
         cache = data["host_cache_delta"]
         shaping = data["request_shaping_delta"]
+        page_cache = data.get("page_cache", {})
+        latency = data["batch_latency_us"]
         rows.append(
             {
+                "source_json": path.name,
                 "case": data["case"],
                 "policy_mode": data.get("policy_mode", "auto"),
+                "repeat_id": data.get("repeat_id", 0),
+                "execution_order": data.get("execution_order", 0),
+                "order_seed": data.get("order_seed", ""),
+                "trace_seed": data.get("trace_seed", ""),
+                "trace_id": data.get("trace_id", ""),
+                "file": data.get("file", ""),
+                "file_size_bytes": data.get("file_size_bytes", ""),
+                "file_allocated_bytes": data.get("file_allocated_bytes", ""),
+                "working_set_bytes": data.get("working_set_bytes", ""),
+                "page_cache_mode": page_cache.get("mode", "unknown"),
+                "file_cache_evicted": page_cache.get("file_evicted", False),
+                "global_cache_dropped": page_cache.get("global_dropped", False),
+                "cached_kib_before": page_cache.get("cached_kib_before", ""),
+                "cached_kib_after": page_cache.get("cached_kib_after", ""),
+                "num_threads": data.get("num_threads", ""),
                 "workload": policy["workload"],
                 "path": policy["path"],
                 "cache": policy["cache"],
@@ -40,9 +58,12 @@ def main() -> None:
                 "cache_entries_before_measurement": data.get(
                     "cache_entries_before_measurement", 0
                 ),
+                "elapsed_seconds": data.get("elapsed_seconds", ""),
                 "iops": data["iops"],
                 "mib_per_second": data["logical_mib_per_second"],
-                "batch_p99_us": data["batch_latency_us"]["p99"],
+                "batch_p50_us": latency.get("p50", ""),
+                "batch_p95_us": latency.get("p95", ""),
+                "batch_p99_us": latency["p99"],
                 "cache_hits": cache.get("hits", 0),
                 "cache_misses": cache.get("misses", 0),
                 "admitted_regions": cache.get("admitted_regions", 0),
@@ -53,6 +74,16 @@ def main() -> None:
         )
     if not rows:
         raise SystemExit("No completed design1 JSON files found")
+
+    # Results are paired by (case, repeat).  Refuse to summarize a matrix in
+    # which policies accidentally used different logical request traces.
+    traces: dict[tuple[str, int], set[str]] = defaultdict(set)
+    for row in rows:
+        if row["trace_id"]:
+            traces[(row["case"], int(row["repeat_id"]))].add(row["trace_id"])
+    mismatched = {key: ids for key, ids in traces.items() if len(ids) != 1}
+    if mismatched:
+        raise SystemExit(f"Mismatched trace_id within paired runs: {mismatched}")
 
     raw_path = args.result_root / "raw_results.csv"
     with raw_path.open("w", newline="", encoding="utf-8") as out:
@@ -71,6 +102,9 @@ def main() -> None:
                 "case": case,
                 "policy_mode": policy_mode,
                 "policy": f'{first["path"]}/{first["cache"]}/{first["submit"]}',
+                "working_set_bytes": first["working_set_bytes"],
+                "page_cache_mode": first["page_cache_mode"],
+                "num_threads": first["num_threads"],
                 "runs": len(group),
                 "iops_median": statistics.median(float(x["iops"]) for x in group),
                 "iops_stdev": statistics.stdev(float(x["iops"]) for x in group)
@@ -78,6 +112,12 @@ def main() -> None:
                 else 0.0,
                 "batch_p99_us_median": statistics.median(
                     float(x["batch_p99_us"]) for x in group
+                ),
+                "batch_p50_us_median": statistics.median(
+                    float(x["batch_p50_us"] or x["batch_p99_us"]) for x in group
+                ),
+                "batch_p95_us_median": statistics.median(
+                    float(x["batch_p95_us"] or x["batch_p99_us"]) for x in group
                 ),
                 "cache_hits_median": statistics.median(
                     int(x["cache_hits"]) for x in group

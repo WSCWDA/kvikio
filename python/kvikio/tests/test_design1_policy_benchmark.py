@@ -8,6 +8,7 @@ pytest.importorskip("cupy")
 from kvikio.benchmarks.design1_policy import (  # noqa: E402
     FORCED_POLICIES,
     POLICY_MODES,
+    _control_page_cache,
     _measurement_offsets,
     _profile_offsets,
 )
@@ -47,6 +48,34 @@ def test_shaped_measurement_preserves_complete_batches():
     for begin in (0, 32):
         group = offsets[begin : begin + 32]
         assert all(right == left + 4096 for left, right in zip(group, group[1:]))
+
+
+@pytest.mark.parametrize(
+    "case,io_size",
+    [
+        ("sequential_large", 128 * 1024),
+        ("random_cold_small", 4096),
+        ("random_hot_small", 4096),
+        ("adjacent_unaligned_small", 4096),
+    ],
+)
+def test_measurement_trace_is_reproducible_and_seeded(case, io_size):
+    args = (case, 64, io_size, 128 * 1024**2, 32)
+
+    first = _measurement_offsets(*args, trace_seed=17)
+    assert first == _measurement_offsets(*args, trace_seed=17)
+    assert first != _measurement_offsets(*args, trace_seed=18)
+
+
+def test_page_cache_none_records_no_eviction(tmp_path):
+    path = tmp_path / "data.bin"
+    path.write_bytes(b"data")
+
+    result = _control_page_cache(path, "none")
+
+    assert result["mode"] == "none"
+    assert result["file_evicted"] is False
+    assert result["global_dropped"] is False
 
 
 def test_forced_policy_modes_cover_all_controlled_baselines():

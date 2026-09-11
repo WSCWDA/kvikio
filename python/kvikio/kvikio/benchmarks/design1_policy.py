@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import random
 import time
 from pathlib import Path
@@ -92,12 +94,25 @@ def _measurement_offsets(
     io_size: int,
     file_size: int,
     batch_size: int,
+    trace_seed: int = 20260910,
 ) -> list[int]:
     usable = file_size - io_size - 4096
+    if usable <= 0:
+        raise ValueError("benchmark working set is too small")
+    rng = random.Random(trace_seed)
     if case == "sequential_large":
-        return [(i * io_size) % usable for i in range(count)]
+        span = count * io_size
+        if span > usable:
+            raise ValueError("sequential_large trace exceeds the working set")
+        slots = max(1, (usable - span) // io_size + 1)
+        base = rng.randrange(slots) * io_size
+        return [base + i * io_size for i in range(count)]
     if case == "random_hot_small":
-        hot = [0, CACHE_LINE_SIZE]
+        lines = usable // CACHE_LINE_SIZE
+        if lines < 2:
+            raise ValueError("random_hot_small requires two cache lines")
+        first = rng.randrange(lines - 1)
+        hot = [first * CACHE_LINE_SIZE, (first + 1) * CACHE_LINE_SIZE]
         return [hot[i % len(hot)] for i in range(count)]
     if case == "random_cold_small":
         lines = usable // CACHE_LINE_SIZE
@@ -110,7 +125,7 @@ def _measurement_offsets(
         # Sampling without replacement prevents accidental cache-line reuse.
         return [
             line * CACHE_LINE_SIZE
-            for line in random.Random(20260910).sample(range(lines), count)
+            for line in rng.sample(range(lines), count)
         ]
     # Build complete adjacent bursts without wrapping in the middle of a batch.
     cluster_span = batch_size * io_size
@@ -118,13 +133,54 @@ def _measurement_offsets(
     max_base = file_size - cluster_span - 4096
     if max_base <= 0:
         raise ValueError("benchmark file is too small for one shaping batch")
+    slots = max(1, max_base // stride)
+    first_slot = rng.randrange(slots)
     offsets: list[int] = []
     for begin in range(0, count, batch_size):
         group_size = min(batch_size, count - begin)
         batch_index = begin // batch_size
-        base = ((8 * REGION_SIZE + batch_index * stride) % max_base) + 3
+        base = ((first_slot + batch_index) % slots) * stride + 3
         offsets.extend(base + i * io_size for i in range(group_size))
     return offsets
+
+
+def _cached_kib() -> int:
+    for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+        if line.startswith("Cached:"):
+            return int(line.split()[1])
+    return -1
+
+
+def _control_page_cache(path: Path, mode: str) -> dict[str, Any]:
+    """Apply one explicit cache-control policy immediately before measurement."""
+    before = _cached_kib()
+    file_evicted = False
+    global_dropped = False
+    if mode in ("file", "global"):
+        os.sync()
+        if not hasattr(os, "posix_fadvise"):
+            raise RuntimeError("file cache control requires os.posix_fadvise")
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            file_evicted = True
+        finally:
+            os.close(fd)
+    if mode == "global":
+        try:
+            Path("/proc/sys/vm/drop_caches").write_text("3\n", encoding="ascii")
+            global_dropped = True
+        except OSError as error:
+            raise PermissionError(
+                "--page-cache-mode=global requires root and writable drop_caches"
+            ) from error
+    return {
+        "mode": mode,
+        "file_evicted": file_evicted,
+        "global_dropped": global_dropped,
+        "cached_kib_before": before,
+        "cached_kib_after": _cached_kib(),
+    }
 
 
 def _submit_batched(
@@ -157,13 +213,27 @@ def _submit_batched(
 def run(args: argparse.Namespace) -> dict[str, Any]:
     case = CASES[args.case]
     io_size = int(case["io_size"])
-    file_size = args.file.stat().st_size
+    file_stat = args.file.stat()
+    file_size = file_stat.st_size
+    working_set_bytes = args.working_set_bytes or file_size
+    if working_set_bytes > file_size:
+        raise ValueError(
+            f"working set {working_set_bytes} exceeds file size {file_size}"
+        )
     profile_offsets = _profile_offsets(
-        args.case, PROFILE_REQUESTS, io_size, file_size
+        args.case, PROFILE_REQUESTS, io_size, working_set_bytes
     )
     measured_offsets = _measurement_offsets(
-        args.case, args.requests, io_size, file_size, args.batch_size
+        args.case,
+        args.requests,
+        io_size,
+        working_set_bytes,
+        args.batch_size,
+        args.trace_seed,
     )
+    trace_id = hashlib.sha256(
+        ",".join(str(offset) for offset in measured_offsets).encode("ascii")
+    ).hexdigest()[:16]
 
     settings = {
         "compat_mode": kvikio.CompatMode.OFF,
@@ -196,7 +266,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 # Admit and populate both hot lines before starting the timer.
                 # Keep this trace independent of --requests so even a short
                 # smoke test has a complete warm-up phase.
-                warmup_offsets = [0, CACHE_LINE_SIZE, 0, CACHE_LINE_SIZE]
+                hot = measured_offsets[:2]
+                warmup_offsets = [hot[0], hot[1], hot[0], hot[1]]
                 _submit_batched(handle, warmup_offsets, io_size, args.batch_size)
                 warmup_requests = len(warmup_offsets)
             before_cache = handle.host_cache_stats()
@@ -210,6 +281,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             )
             cache_entries_before_measurement = before_cache["cache_entries"]
             before_shaping = handle.io_context()["shaping"]
+            page_cache = _control_page_cache(args.file, args.page_cache_mode)
             start = time.perf_counter()
             completed, latencies = _submit_batched(
                 handle, measured_offsets, io_size, args.batch_size
@@ -302,6 +374,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "case": args.case,
         "policy_mode": args.policy,
+        "repeat_id": args.repeat_id,
+        "execution_order": args.execution_order,
+        "order_seed": args.order_seed,
+        "trace_seed": args.trace_seed,
+        "trace_id": trace_id,
+        "file": str(args.file),
+        "file_size_bytes": file_size,
+        "file_allocated_bytes": file_stat.st_blocks * 512,
+        "working_set_bytes": working_set_bytes,
+        "page_cache": page_cache,
+        "num_threads": kvikio.defaults.get("num_threads"),
         "requests": args.requests,
         "profile_requests": PROFILE_REQUESTS,
         "warmup_requests": warmup_requests,
@@ -334,12 +417,22 @@ def main() -> None:
     parser.add_argument("--requests", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--cache-bytes", type=int, default=256 * 1024**2)
+    parser.add_argument("--working-set-bytes", type=int)
+    parser.add_argument(
+        "--page-cache-mode", choices=("none", "file", "global"), default="file"
+    )
+    parser.add_argument("--repeat-id", type=int, default=1)
+    parser.add_argument("--execution-order", type=int, default=0)
+    parser.add_argument("--order-seed", type=int, default=20260911)
+    parser.add_argument("--trace-seed", type=int, default=20260910)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.requests <= 0:
         parser.error("--requests must be positive")
     if args.batch_size <= 0:
         parser.error("--batch-size must be positive")
+    if args.working_set_bytes is not None and args.working_set_bytes <= 0:
+        parser.error("--working-set-bytes must be positive")
     result = run(args)
     encoded = json.dumps(result, indent=2)
     if args.output:

@@ -49,7 +49,9 @@ export KVIKIO_POLICY_MODE=gds_direct
 3. **Cache reset**：保留IOContext policy，清空profiling产生的cache line与region
    admission历史；
 4. **Warm-up**：仅`random_hot_small`执行4次请求，使两个热点cache line达到准入阈值；
-5. **Measurement**：统计正式请求的IOPS、带宽、batch p99、cache和shaping增量。
+5. **Cache control**：在计时区间外执行文件级`POSIX_FADV_DONTNEED`，论文实验可进一步
+   使用全局`drop_caches`，避免前一个策略为后一个策略预热Linux Page Cache；
+6. **Measurement**：统计正式请求的IOPS、带宽、batch p50/p95/p99、cache和shaping增量。
 
 在warm-up与measurement边界额外记录三个状态：
 
@@ -76,7 +78,35 @@ export KVIKIO_POLICY_MODE=gds_direct
 `ADMIT`表示请求进入region admission判断，不表示所有小请求都会缓存。冷访问应被
 拒绝，热点访问达到阈值后才分配Host Cache line。
 
-## 文件大小与运行方法
+## 数据文件与实验控制
+
+大于DRAM的数据文件与Page Cache清理解决的是两个不同问题：
+
+- 大文件提供大于内存的offset采样空间，避免随机cold trace长期局限于可完全驻留的小文件；
+- cache control保证每个强制策略在相同的Linux Page Cache起点运行，消除策略执行顺序造成的
+  跨运行污染。
+
+因此，**大文件不能替代drop cache**。例如8192个4 KiB请求一次只读取32 MiB，即使offset
+分布在272 GiB文件中，也不代表该次运行读取了272 GiB。`WORKING_SET_BYTES`定义offset的
+采样范围，不等于实际读取量。
+
+如果已有`/mnt/gds/cwd_test/design2-cold-272g.bin`，且它是真实分配而不是稀疏文件，
+不需要重新创建。先检查：
+
+```bash
+DESIGN1_FILE=/mnt/gds/cwd_test/design2-cold-272g.bin
+size=$(stat -c %s "$DESIGN1_FILE")
+allocated=$(( $(stat -c %b "$DESIGN1_FILE") * 512 ))
+mem_bytes=$(awk '/MemTotal:/ {print $2 * 1024}' /proc/meminfo)
+echo "size=$size allocated=$allocated memory=$mem_bytes"
+du -B1 "$DESIGN1_FILE"
+```
+
+需要同时满足`size > memory`且`allocated`接近`size`。运行脚本还会拒绝物理分配低于逻辑
+大小95%的稀疏文件。如果现有文件不满足这两个条件，才需要重新创建并完整写入；不要用
+`truncate`或`fallocate`后不写数据来替代真实数据集。
+
+### 冒烟测试
 
 默认1024个测量请求需要至少128 MiB真实文件：
 
@@ -91,17 +121,39 @@ REPEATS=5 REQUESTS=1024 BATCH_SIZE=32 \
 bash scripts/run_design1_policy.sh
 ```
 
-执行同trace五策略矩阵：
+该命令默认使用`PAGE_CACHE_MODE=file`，适合确认功能和权限。文件级fadvise是提示语义，
+不能作为论文中“全局冷缓存”的唯一证据。
+
+### 论文五策略矩阵
+
+在独占实验节点上以root运行；`PAGE_CACHE_MODE=global`会影响整台机器，不应在共享节点使用：
 
 ```bash
-DESIGN1_FILE=/mnt/gds/groute-design1.bin \
+DESIGN1_FILE=/mnt/gds/cwd_test/design2-cold-272g.bin
+WORKING_SET_BYTES=$(stat -c %s "$DESIGN1_FILE")
+
+DESIGN1_FILE="$DESIGN1_FILE" \
+WORKING_SET_BYTES="$WORKING_SET_BYTES" \
 RESULT_ROOT=/mnt/gds/results/groute-design1-policy-matrix \
 POLICIES="auto host_direct host_cache gds_direct gds_shaped" \
+PAGE_CACHE_MODE=global \
+ORDER_SEED=20260911 TRACE_SEED=20260910 \
 REPEATS=10 REQUESTS=8192 BATCH_SIZE=32 \
 bash scripts/run_design1_policy.sh
 ```
 
-当`REQUESTS=8192`时，cold trace要求至少约512 MiB文件，建议使用1 GiB真实文件。
+对每个`(repeat, workload)`，脚本用固定seed生成一条逻辑offset trace，五种policy共享该
+`trace_id`；policy执行顺序则按repeat随机化。汇总器会保留`repeat_id`、`execution_order`、
+`trace_id`、文件物理分配、working set、cache-control结果和线程数，并拒绝同一配对组中
+`trace_id`不一致的数据。这样可用配对统计比较AUTO和四种强制策略，而不会把trace差异或
+固定顺序误当成policy收益。
+
+脚本还生成`experiment_metadata.txt`，记录commit、kernel、GPU、线程数、数据文件逻辑与
+物理大小、working set、cache模式和随机种子。归档论文数据时应将它与JSON和CSV一起保存。
+
+当`REQUESTS=8192`时，cold trace最低只要求约512 MiB文件；该下限只保证请求不复用
+64 KiB cache line，不代表文件规模足以排除DRAM驻留。论文主实验建议使用现有272 GiB
+物理文件并覆盖完整offset域。
 `summary.csv`按`(case, policy_mode)`分别汇总，不能把不同强制策略合并为同一组。
 
 冷随机请求要求每个请求对应不同的64 KiB cache line。所需文件大小近似为：
