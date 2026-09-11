@@ -1,0 +1,143 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 468763f..ebdaf88 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -21,6 +21,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+ option(GUSTANN_USE_BAM "Enable BaM support" OFF)
+ option(GUSTANN_USE_SPDK "Enable SPDK (Storage Performance Development Kit) support" OFF)
+ option(GUSTANN_USE_URING "Enable io_uring support" OFF)
++option(GUSTANN_USE_GROUTE "Enable KvikIO G-Route support" OFF)
+ option(GUSTANN_USE_AIO "Enable libaio support" OFF)
+ message(${GUSTANN_USE_BAM} ${GUSTANN_USE_SPDK})
+ 
+diff --git a/bin/search_disk.cpp b/bin/search_disk.cpp
+index 62cd36e..f5aa49d 100644
+--- a/bin/search_disk.cpp
++++ b/bin/search_disk.cpp
+@@ -116,8 +116,11 @@ int main(int argc, char **argv) {
+   } else if (io_backend == "aio") {
+     INFO("Use AIO Backend");
+     hybrid_config.use_backend = gustann::HybridExecutorConfig::AIO;
++  } else if (io_backend == "groute") {
++    INFO("Use KvikIO G-Route Backend");
++    hybrid_config.use_backend = gustann::HybridExecutorConfig::GROUTE;
+   } else {
+-    ERROR("unrecognized io_backend: {}, must be 'memory', 'spdk', 'uring', or 'aio'", io_backend);
++    ERROR("unrecognized io_backend: {}, must be 'memory', 'spdk', 'uring', 'aio', or 'groute'", io_backend);
+     exit(-1);
+   }
+   hybrid_config.ssd_lists = ssd_lists;
+diff --git a/src/hybrid.cu b/src/hybrid.cu
+index c4eb2e3..bc41824 100644
+--- a/src/hybrid.cu
++++ b/src/hybrid.cu
+@@ -103,5 +103,13 @@ namespace gustann {
+       exit(-1);
+ #endif
++    } else if (config.use_backend == HybridExecutorConfig::GROUTE) {
++#ifdef USE_GROUTE
++      loader_ = create_groute_loader(fpath.c_str(), thread_cnt_ * ctx_per_thread_);
++#else
++      ERROR("G-Route Not Supported! Please recompile with `cmake "
++            "-DGUSTANN_USE_GROUTE=ON`");
++      exit(-1);
++#endif
+     } else {
+       ERROR("Wrong IO Backend setting!");
+       exit(-1);
+@@ -258,6 +274,7 @@ namespace gustann {
+     INFO("Total reads: {}", tot_reads.load());
+     REPORT("Time %lf", end - start);
+     REPORT("IO %d", tot_reads.load());
++    loader_->log_latency({0.50, 0.95, 0.99});
+     CHECK_CUDA(cudaDeviceSynchronize());
+ 
+   }
+diff --git a/src/hybrid_config.hpp b/src/hybrid_config.hpp
+index f4a4d6a..4011922 100644
+--- a/src/hybrid_config.hpp
++++ b/src/hybrid_config.hpp
+@@ -12,6 +12,7 @@ struct HybridExecutorConfig {
+     MEMORY,
+     URING,
+     AIO,
++    GROUTE,
+   } use_backend;
+   std::vector<std::string> ssd_lists;
+ };
+diff --git a/src/hyd_task_runner.cu b/src/hyd_task_runner.cu
+index c6fb6b5..c3a815a 100644
+--- a/src/hyd_task_runner.cu
++++ b/src/hyd_task_runner.cu
+@@ -77,7 +77,11 @@ namespace gustann {
+         request[j] = start_pt[j] == -1 ? enter_point : start_pt[j];
+ #else
+         //read_page(enter_point_, local_buf + PAGE_SIZE * j);
+-        memcpy(buffer + PAGE_SIZE * j, starter, PAGE_SIZE);
++        if (loader->is_device_buffer()) {
++          CHECK_CUDA(cudaMemcpy(buffer + PAGE_SIZE * j, starter, PAGE_SIZE, cudaMemcpyHostToDevice));
++        } else {
++          memcpy(buffer + PAGE_SIZE * j, starter, PAGE_SIZE);
++        }
+         //CHECK_CUDA(cudaMemcpyAsync(buffer + PAGE_SIZE * j, starter,
+         //                           PAGE_SIZE, cudaMemcpyHostToHost,
+         //                           stream));
+@@ -338,7 +338,9 @@ namespace gustann {
+ 
+     buffer = loader->create_buffer((int64_t)PAGE_SIZE * mini_batch);
+       
+-    CHECK_CUDA(cudaHostRegister(buffer, sizeof(uint8_t) * PAGE_SIZE * mini_batch, cudaHostRegisterDefault));
++    if (!loader->is_device_buffer()) {
++      CHECK_CUDA(cudaHostRegister(buffer, sizeof(uint8_t) * PAGE_SIZE * mini_batch, cudaHostRegisterDefault));
++    }
+ #ifdef COPY_DATA
+     CHECK_CUDA(cudaMalloc(&buffer_dev, PAGE_SIZE * mini_batch));
+     CHECK_CUDA(cudaMalloc(&request_dev, sizeof(int32_t) * mini_batch));
+@@ -388,7 +390,9 @@ namespace gustann {
+       CHECK_CUDA(cudaFreeHost(request));
+     }
+     if (buffer) {
+-      CHECK_CUDA(cudaHostUnregister(buffer));
++      if (!loader->is_device_buffer()) {
++        CHECK_CUDA(cudaHostUnregister(buffer));
++      }
+       loader->destroy_buffer(buffer);
+     }
+     if (stream) {
+diff --git a/src/io/CMakeLists.txt b/src/io/CMakeLists.txt
+index f4b92f5..fd8a5e6 100644
+--- a/src/io/CMakeLists.txt
++++ b/src/io/CMakeLists.txt
+@@ -25,3 +25,11 @@ if (GUSTANN_USE_AIO)
+   target_link_libraries(index_loader PUBLIC aio)
+   target_compile_definitions(index_loader PUBLIC "USE_AIO")
+ endif()
++
++if (GUSTANN_USE_GROUTE)
++  message("include KvikIO G-Route Backend")
++  find_package(kvikio CONFIG REQUIRED)
++  target_sources(index_loader PRIVATE groute.cpp)
++  target_link_libraries(index_loader PUBLIC kvikio::kvikio CUDA::cudart)
++  target_compile_definitions(index_loader PUBLIC "USE_GROUTE")
++endif()
+diff --git a/src/io/interface.hpp b/src/io/interface.hpp
+index 209e362..cc8beef 100644
+--- a/src/io/interface.hpp
++++ b/src/io/interface.hpp
+@@ -20,6 +20,7 @@ namespace gustann {
+     virtual void clear_stats() {}
+     virtual uint8_t *create_buffer(int64_t size) = 0;
+     virtual void destroy_buffer(uint8_t *) = 0;
++    virtual bool is_device_buffer() const { return false; }
+     virtual ~IndexLoader() {}
+   };
+ 
+@@ -38,4 +39,8 @@ namespace gustann {
+ #ifdef USE_AIO
+   std::shared_ptr<IndexLoader> create_aio_loader(const char* filename, int ctx_cnt);
+ #endif
++
++#ifdef USE_GROUTE
++  std::shared_ptr<IndexLoader> create_groute_loader(const char* filename, int ctx_cnt);
++#endif
+ } // namespace gustann

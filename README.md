@@ -20,6 +20,7 @@ KvikIO also works efficiently when GDS isn't available and can read/write both h
 ### Documentation
  * Python: <https://docs.rapids.ai/api/kvikio/nightly/>
  * C++: <https://docs.rapids.ai/api/libkvikio/nightly/>
+ * G-Route Design 1 and DiskANN evaluation: [docs/groute_design1_diskann_zh.md](docs/groute_design1_diskann_zh.md)
 
 
 ### Examples
