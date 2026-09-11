@@ -42,6 +42,21 @@ PROFILE_REQUESTS = 64
 REGION_SIZE = 1024 * 1024
 CACHE_LINE_SIZE = 64 * 1024
 
+POLICY_MODES = {
+    "auto": kvikio.PolicyMode.AUTO,
+    "host_direct": kvikio.PolicyMode.HOST_DIRECT,
+    "host_cache": kvikio.PolicyMode.HOST_CACHE,
+    "gds_direct": kvikio.PolicyMode.GDS_DIRECT,
+    "gds_shaped": kvikio.PolicyMode.GDS_SHAPED,
+}
+
+FORCED_POLICIES = {
+    "host_direct": ("HOST_MEDIATED", "BYPASS", "DIRECT"),
+    "host_cache": ("HOST_MEDIATED", "ADMIT", "DIRECT"),
+    "gds_direct": ("GPU_DIRECT", "BYPASS", "DIRECT"),
+    "gds_shaped": ("GPU_DIRECT", "BYPASS", "SHAPED"),
+}
+
 
 def _profile_offsets(case: str, count: int, io_size: int, file_size: int) -> list[int]:
     usable = file_size - io_size - 4096
@@ -154,8 +169,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "compat_mode": kvikio.CompatMode.OFF,
         "gds_threshold": 0,
         "task_size": io_size,
-        "host_cache_enabled": True,
-        "request_shaping_enabled": True,
+        "host_cache_enabled": args.policy in ("auto", "host_cache"),
+        "request_shaping_enabled": args.policy in ("auto", "gds_shaped"),
+        "policy_mode": POLICY_MODES[args.policy],
         "host_cache_capacity": args.cache_bytes,
         "host_cache_line_size": CACHE_LINE_SIZE,
         "host_cache_max_io_size": CACHE_LINE_SIZE,
@@ -172,7 +188,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             handle.clear_host_cache()
             after_reset_cache = handle.host_cache_stats()
             warmup_requests = 0
-            if args.case == "random_hot_small":
+            warm_host_cache = args.case == "random_hot_small" and args.policy in (
+                "auto",
+                "host_cache",
+            )
+            if warm_host_cache:
                 # Admit and populate both hot lines before starting the timer.
                 # Keep this trace independent of --requests so even a short
                 # smoke test has a complete warm-up phase.
@@ -204,15 +224,28 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             f"{args.case}: completed {completed} bytes, expected {expected_bytes}"
         )
 
-    expected = case["expected"]
+    expected_workload = case["expected"][0]
+    expected_policy = (
+        case["expected"][1:]
+        if args.policy == "auto"
+        else FORCED_POLICIES[args.policy]
+    )
     actual = (
-        selected["workload"],
         selected["path"],
         selected["cache"],
         selected["submit"],
     )
-    if actual != expected:
-        raise RuntimeError(f"{args.case}: expected policy {expected}, selected {actual}")
+    if selected["policy_mode"] != args.policy.upper():
+        raise RuntimeError(
+            f"FileHandle retained {selected['policy_mode']} instead of "
+            f"requested mode {args.policy.upper()}"
+        )
+    if selected["workload"] != expected_workload or actual != expected_policy:
+        raise RuntimeError(
+            f"{args.case}/{args.policy}: expected workload={expected_workload}, "
+            f"policy={expected_policy}; selected workload={selected['workload']}, "
+            f"policy={actual}"
+        )
 
     cache_delta = {
         key: after_cache[key] - before_cache.get(key, 0) for key in after_cache
@@ -229,12 +262,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "random_cold_small unexpectedly reused or admitted cache data: "
             f"{cache_delta}"
         )
-    if args.case == "random_hot_small" and cache_delta.get("hits", 0) != args.requests:
+    if warm_host_cache and cache_delta.get("hits", 0) != args.requests:
         raise RuntimeError(
             "random_hot_small did not remain fully cached after warm-up: "
             f"{cache_delta}"
         )
-    if args.case == "random_hot_small" and (
+    if warm_host_cache and (
         warmup_admitted_regions != 1
         or warmup_storage_bytes != 2 * CACHE_LINE_SIZE
         or cache_entries_before_measurement != 2
@@ -245,7 +278,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             f"storage_bytes={warmup_storage_bytes}, "
             f"cache_entries={cache_entries_before_measurement}"
         )
-    if args.case != "random_hot_small" and (
+    if not warm_host_cache and (
         warmup_admitted_regions != 0
         or warmup_storage_bytes != 0
         or cache_entries_before_measurement != 0
@@ -256,9 +289,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             f"storage_bytes={warmup_storage_bytes}, "
             f"cache_entries={cache_entries_before_measurement}"
         )
-    if args.case == "adjacent_unaligned_small" and shaping_delta.get(
-        "physical_requests", args.requests
-    ) >= args.requests:
+    if (
+        args.case == "adjacent_unaligned_small"
+        and selected["submit"] == "SHAPED"
+        and shaping_delta.get("physical_requests", args.requests) >= args.requests
+    ):
         raise RuntimeError(
             "adjacent_unaligned_small was not coalesced: " f"{shaping_delta}"
         )
@@ -266,6 +301,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     percentile = lambda q: ordered[min(len(ordered) - 1, int(q * len(ordered)))]
     return {
         "case": args.case,
+        "policy_mode": args.policy,
         "requests": args.requests,
         "profile_requests": PROFILE_REQUESTS,
         "warmup_requests": warmup_requests,
@@ -294,6 +330,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--file", type=Path, required=True)
     parser.add_argument("--case", choices=CASES, required=True)
+    parser.add_argument("--policy", choices=POLICY_MODES, default="auto")
     parser.add_argument("--requests", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--cache-bytes", type=int, default=256 * 1024**2)

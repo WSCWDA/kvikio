@@ -6,6 +6,8 @@ import pytest
 pytest.importorskip("cupy")
 
 from kvikio.benchmarks.design1_policy import (  # noqa: E402
+    FORCED_POLICIES,
+    POLICY_MODES,
     _measurement_offsets,
     _profile_offsets,
 )
@@ -45,3 +47,19 @@ def test_shaped_measurement_preserves_complete_batches():
     for begin in (0, 32):
         group = offsets[begin : begin + 32]
         assert all(right == left + 4096 for left, right in zip(group, group[1:]))
+
+
+def test_forced_policy_modes_cover_all_controlled_baselines():
+    assert set(POLICY_MODES) == {
+        "auto",
+        "host_direct",
+        "host_cache",
+        "gds_direct",
+        "gds_shaped",
+    }
+    assert FORCED_POLICIES == {
+        "host_direct": ("HOST_MEDIATED", "BYPASS", "DIRECT"),
+        "host_cache": ("HOST_MEDIATED", "ADMIT", "DIRECT"),
+        "gds_direct": ("GPU_DIRECT", "BYPASS", "DIRECT"),
+        "gds_shaped": ("GPU_DIRECT", "BYPASS", "SHAPED"),
+    }

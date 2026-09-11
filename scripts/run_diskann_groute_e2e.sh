@@ -28,6 +28,7 @@ MODES="${MODES:-aio groute}"
 RESULT_ROOT="${RESULT_ROOT:-/tmp/groute-diskann-e2e}"
 DROP_CACHES="${DROP_CACHES:-0}"
 KVIKIO_THREADS="${KVIKIO_THREADS:-${SEARCH_THREADS}}"
+POLICY_MODE="${POLICY_MODE:-auto}"
 
 for path in "${GUSTANN_BIN}" "${INDEX_FILE}" "${QUERY_FILE}" "${GT_FILE}"; do
   if [[ ! -f "${path}" ]]; then
@@ -65,6 +66,13 @@ for mode in "${mode_array[@]}"; do
     exit 2
   fi
 done
+case "${POLICY_MODE}" in
+  auto | host_direct | host_cache | gds_direct | gds_shaped) ;;
+  *)
+    echo "Unsupported POLICY_MODE: ${POLICY_MODE}" >&2
+    exit 2
+    ;;
+esac
 
 mkdir -p "${RESULT_ROOT}"
 rm -f "${RESULT_ROOT}/failed_runs.txt"
@@ -95,6 +103,7 @@ run_one() {
       KVIKIO_GDS_THRESHOLD=0 \
       KVIKIO_TASK_SIZE=4096 \
       KVIKIO_NTHREADS="${KVIKIO_THREADS}" \
+      KVIKIO_POLICY_MODE="${POLICY_MODE}" \
       KVIKIO_HOST_CACHE=1 \
       KVIKIO_HOST_CACHE_CAPACITY="${KVIKIO_HOST_CACHE_CAPACITY:-1073741824}" \
       KVIKIO_HOST_CACHE_LINE_SIZE="${KVIKIO_HOST_CACHE_LINE_SIZE:-65536}" \

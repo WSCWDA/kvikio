@@ -26,6 +26,7 @@ def main() -> None:
         rows.append(
             {
                 "case": data["case"],
+                "policy_mode": data.get("policy_mode", "auto"),
                 "workload": policy["workload"],
                 "path": policy["path"],
                 "cache": policy["cache"],
@@ -59,15 +60,16 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(rows)
 
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        grouped[row["case"]].append(row)
+        grouped[(row["case"], row["policy_mode"])].append(row)
     summary: list[dict[str, Any]] = []
-    for case, group in sorted(grouped.items()):
+    for (case, policy_mode), group in sorted(grouped.items()):
         first = group[0]
         summary.append(
             {
                 "case": case,
+                "policy_mode": policy_mode,
                 "policy": f'{first["path"]}/{first["cache"]}/{first["submit"]}',
                 "runs": len(group),
                 "iops_median": statistics.median(float(x["iops"]) for x in group),

@@ -52,6 +52,13 @@ cdef extern from "<kvikio/file_handle.hpp>" namespace "kvikio" nogil:
         DIRECT = 0
         SHAPED = 1
 
+    cdef enum class PolicyMode(uint8_t):
+        AUTO = 0
+        HOST_DIRECT = 1
+        HOST_CACHE = 2
+        GDS_DIRECT = 3
+        GDS_SHAPED = 4
+
     cdef cppclass IOPolicy:
         IOPath path
         CachePolicy cache
@@ -72,6 +79,7 @@ cdef extern from "<kvikio/file_handle.hpp>" namespace "kvikio" nogil:
         bool profile_complete
 
     cdef cppclass IOContextSnapshot:
+        PolicyMode policy_mode
         WorkloadClass workload
         IOPolicy policy
         RuntimeStats stats
@@ -224,6 +232,13 @@ cdef class CuFile:
             result = self._handle.io_context_snapshot()
             shaping = self._handle.request_shaper_stats()
         return {
+            "policy_mode": (
+                "HOST_DIRECT" if result.policy_mode == PolicyMode.HOST_DIRECT else
+                "HOST_CACHE" if result.policy_mode == PolicyMode.HOST_CACHE else
+                "GDS_DIRECT" if result.policy_mode == PolicyMode.GDS_DIRECT else
+                "GDS_SHAPED" if result.policy_mode == PolicyMode.GDS_SHAPED else
+                "AUTO"
+            ),
             "workload": (
                 "SEQUENTIAL_SCAN" if result.workload == WorkloadClass.SEQUENTIAL_SCAN else
                 "REUSE_DOMINATED" if result.workload == WorkloadClass.REUSE_DOMINATED else

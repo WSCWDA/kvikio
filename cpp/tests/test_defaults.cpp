@@ -217,6 +217,22 @@ TEST(DefaultsTest, alias_for_getenv_or)
     EXPECT_TRUE(has_found);
   }
 
+  // Special type: PolicyMode
+  {
+    kvikio::test::EnvVarContext env_var_ctx{{"KVIKIO_TEST_ALIAS", "  GdS_ShApEd  "}};
+    auto const [env_var_name, result, has_found] =
+      kvikio::getenv_or({"KVIKIO_TEST_ALIAS"}, kvikio::PolicyMode::AUTO);
+    EXPECT_EQ(env_var_name, std::string_view{"KVIKIO_TEST_ALIAS"});
+    EXPECT_EQ(result, kvikio::PolicyMode::GDS_SHAPED);
+    EXPECT_TRUE(has_found);
+  }
+  {
+    kvikio::test::EnvVarContext env_var_ctx{{"KVIKIO_TEST_ALIAS", "invalid"}};
+    EXPECT_THROW(
+      kvikio::getenv_or({"KVIKIO_TEST_ALIAS"}, kvikio::PolicyMode::AUTO),
+      std::invalid_argument);
+  }
+
   // Special type: std::vector<int>
   {
     kvikio::test::EnvVarContext env_var_ctx{{"KVIKIO_TEST_ALIAS", "109, 108, 107"}};

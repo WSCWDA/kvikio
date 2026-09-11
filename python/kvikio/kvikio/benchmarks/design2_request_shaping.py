@@ -26,7 +26,6 @@ import kvikio.defaults
 
 KIB = 1024
 MIB = 1024 * KIB
-PROFILE_REQUESTS = 64
 MEASURE_BASE = 8 * MIB + 3
 PATTERN_PERIOD = 251
 PATTERN_CHUNK_SIZE = PATTERN_PERIOD * 256 * KIB
@@ -209,39 +208,6 @@ def drop_global_page_cache(path: Path) -> dict[str, int | bool]:
     }
 
 
-def warm_profile(
-    handle: kvikio.CuFile,
-    mode: str,
-    small_buffers: list,
-    large_buffers: list,
-) -> None:
-    futures = []
-    if mode == "gds_direct":
-        size = 64 * KIB
-        for i in range(PROFILE_REQUESTS):
-            futures.append(
-                handle.pread(large_buffers[i], size, i * size, task_size=size)
-            )
-    elif mode in ("host_buffered", "host_direct"):
-        size = 4 * KIB
-        for i in range(PROFILE_REQUESTS):
-            futures.append(
-                handle.pread(
-                    small_buffers[i], size, i * 64 * KIB, task_size=size
-                )
-            )
-    else:
-        size = 4 * KIB
-        for i in range(PROFILE_REQUESTS):
-            futures.append(
-                handle.pread(
-                    small_buffers[i], size, 3 + i * size, task_size=size
-                )
-            )
-    for future in futures:
-        finish(future)
-
-
 def verify_wave(buffers, offsets: list[int], io_size: int) -> None:
     """Verify a wave before its reusable GPU buffers are overwritten.
 
@@ -295,12 +261,6 @@ def run_mode(
     drop_caches: bool = False,
 ) -> dict:
     buffers = [cupy.empty(io_size, dtype=cupy.uint8) for _ in range(batch_size)]
-    profile_small_buffers = [
-        cupy.empty(4 * KIB, dtype=cupy.uint8) for _ in range(PROFILE_REQUESTS)
-    ]
-    profile_large_buffers = [
-        cupy.empty(64 * KIB, dtype=cupy.uint8) for _ in range(PROFILE_REQUESTS)
-    ]
     total_span = required_file_size(
         requests,
         io_size,
@@ -312,13 +272,26 @@ def run_mode(
     if mode not in DEFAULT_MODES:
         raise ValueError(f"unknown mode: {mode}")
     host_direct = mode == "host_direct"
+    policy_mode = {
+        "host_buffered": kvikio.PolicyMode.HOST_DIRECT,
+        "host_direct": kvikio.PolicyMode.HOST_DIRECT,
+        "gds_direct": kvikio.PolicyMode.GDS_DIRECT,
+        "gds_shaped": kvikio.PolicyMode.GDS_SHAPED,
+    }[mode]
+    expected_policy_mode = {
+        "host_buffered": "HOST_DIRECT",
+        "host_direct": "HOST_DIRECT",
+        "gds_direct": "GDS_DIRECT",
+        "gds_shaped": "GDS_SHAPED",
+    }[mode]
 
     with kvikio.defaults.set(
         {
             "compat_mode": kvikio.CompatMode.OFF,
             "gds_threshold": 0,
             "host_cache_enabled": False,
-            "request_shaping_enabled": True,
+            "request_shaping_enabled": mode == "gds_shaped",
+            "policy_mode": policy_mode,
             "auto_direct_io_read": host_direct,
             "auto_direct_io_read_overread": host_direct,
         }
@@ -337,9 +310,6 @@ def run_mode(
                     raise RuntimeError(
                         "host_direct requested, but KvikIO did not open an O_DIRECT fd"
                     )
-            warm_profile(
-                handle, mode, profile_small_buffers, profile_large_buffers
-            )
             selected = handle.io_context()
             expected = {
                 "gds_direct": ("GPU_DIRECT", "DIRECT"),
@@ -349,6 +319,8 @@ def run_mode(
             }[mode]
             if (selected["path"], selected["submit"]) != expected:
                 raise RuntimeError(f"unexpected {mode} policy: {selected}")
+            if selected["policy_mode"] != expected_policy_mode:
+                raise RuntimeError(f"unexpected {mode} PolicyMode: {selected}")
             shaping_before = selected["shaping"].copy()
 
             cache_drop = (

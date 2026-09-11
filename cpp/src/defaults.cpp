@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <cstdlib>
 #include <sstream>
@@ -60,6 +62,31 @@ CompatMode getenv_or(std::string_view env_var_name, CompatMode default_val)
   auto* env_val = std::getenv(env_var_name.data());
   if (env_val == nullptr) { return default_val; }
   return detail::parse_compat_mode_str(env_val);
+}
+
+template <>
+PolicyMode getenv_or(std::string_view env_var_name, PolicyMode default_val)
+{
+  KVIKIO_NVTX_FUNC_RANGE();
+  auto const* env_val = std::getenv(env_var_name.data());
+  if (env_val == nullptr) { return default_val; }
+
+  std::string value{env_val};
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+    return std::tolower(c);
+  });
+  auto const first = value.find_first_not_of(" \t\n\r\f\v");
+  auto const last  = value.find_last_not_of(" \t\n\r\f\v");
+  value = first == std::string::npos ? std::string{} : value.substr(first, last - first + 1);
+
+  if (value == "auto") { return PolicyMode::AUTO; }
+  if (value == "host_direct") { return PolicyMode::HOST_DIRECT; }
+  if (value == "host_cache") { return PolicyMode::HOST_CACHE; }
+  if (value == "gds_direct") { return PolicyMode::GDS_DIRECT; }
+  if (value == "gds_shaped") { return PolicyMode::GDS_SHAPED; }
+  KVIKIO_FAIL("unknown config value " + std::string{env_var_name} + "=" +
+                std::string{env_val},
+              std::invalid_argument);
 }
 
 template <>
@@ -152,6 +179,10 @@ defaults::defaults()
   // Request shaping is experimental and opt-in.
   {
     _request_shaping_enabled = getenv_or("KVIKIO_REQUEST_SHAPING", false);
+  }
+  // AUTO profiles the first requests. Other values provide controlled evaluation baselines.
+  {
+    _policy_mode = getenv_or("KVIKIO_POLICY_MODE", PolicyMode::AUTO);
   }
   // Determine the default value of `http_max_attempts`
   {
@@ -263,6 +294,10 @@ void defaults::set_request_shaping_enabled(bool enabled)
 {
   instance()->_request_shaping_enabled = enabled;
 }
+
+PolicyMode defaults::policy_mode() { return instance()->_policy_mode; }
+
+void defaults::set_policy_mode(PolicyMode mode) { instance()->_policy_mode = mode; }
 
 std::size_t defaults::host_cache_capacity() { return instance()->_host_cache_capacity; }
 

@@ -83,6 +83,11 @@ bash scripts/run_diskann_groute_e2e.sh
 `DROP_CACHES=1`。结果包括中位QPS、线程平均查询延迟、Recall、page reads，以及
 G-Route最终选择的policy、cache和shaping统计。
 
+默认`POLICY_MODE=auto`评估完整G-Route。为了在相同DiskANN查询上构造受控基线，可分别
+设置`POLICY_MODE=host_direct|host_cache|gds_direct|gds_shaped`。该变量通过
+`KVIKIO_POLICY_MODE`传入进程，并从每个新建KvikIO `FileHandle`的首个请求起固定执行策略；
+强制模式仍保留前64请求的workload统计，不允许分类结果覆盖策略。
+
 ## 有效性要求
 
 1. AIO与G-Route Recall差异不超过配置容差；

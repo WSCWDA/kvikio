@@ -31,6 +31,15 @@ enum class CachePolicy : std::uint8_t { BYPASS, ADMIT };
 
 enum class SubmitPolicy : std::uint8_t { DIRECT, SHAPED };
 
+/** @brief Select automatic policy classification or force a controlled execution baseline. */
+enum class PolicyMode : std::uint8_t {
+  AUTO        = 0,
+  HOST_DIRECT = 1,
+  HOST_CACHE  = 2,
+  GDS_DIRECT  = 3,
+  GDS_SHAPED  = 4
+};
+
 struct IOPolicy {
   IOPath path{IOPath::GPU_DIRECT};
   CachePolicy cache{CachePolicy::BYPASS};
@@ -65,6 +74,7 @@ struct RuntimeStats {
 };
 
 struct IOContextSnapshot {
+  PolicyMode policy_mode{PolicyMode::AUTO};
   WorkloadClass workload{WorkloadClass::UNKNOWN};
   IOPolicy policy{};
   RuntimeStats stats{};
@@ -73,9 +83,10 @@ struct IOContextSnapshot {
 /**
  * @brief Per-FileHandle workload profile and stable read policy.
  *
- * The first `profile_request_limit` logical device reads form one profiling window. A policy is
- * selected once at the end of that window and reused for the rest of the handle lifetime. This
- * intentionally avoids per-request prediction and policy oscillation in the small-I/O path.
+ * The first `profile_request_limit` logical device reads form one profiling window. In AUTO mode,
+ * a policy is selected once at the end of that window and reused for the rest of the handle
+ * lifetime. A forced PolicyMode installs its policy at construction while retaining the bounded
+ * workload profile for observability. This avoids per-request prediction and policy oscillation.
  */
 class IOContext {
  public:
@@ -83,7 +94,8 @@ class IOContext {
 
   explicit IOContext(bool host_cache_available      = false,
                      bool request_shaping_available = false,
-                     ShapingConfig shaping_config   = {}) noexcept;
+                     ShapingConfig shaping_config   = {},
+                     PolicyMode policy_mode          = PolicyMode::AUTO) noexcept;
   IOContext(IOContext const&)            = delete;
   IOContext& operator=(IOContext const&) = delete;
   IOContext(IOContext&&)                 = delete;
@@ -100,6 +112,7 @@ class IOContext {
   [[nodiscard]] RuntimeStats stats() const noexcept;
   [[nodiscard]] IOContextSnapshot snapshot() const noexcept;
   [[nodiscard]] bool profile_complete() const noexcept;
+  [[nodiscard]] PolicyMode policy_mode() const noexcept;
   void reset() noexcept;
 
  private:
@@ -107,10 +120,12 @@ class IOContext {
   static constexpr std::size_t region_table_len = profile_request_limit;
 
   void classify() noexcept;
+  void apply_forced_policy() noexcept;
 
   bool _host_cache_available{};
   bool _request_shaping_available{};
   ShapingConfig _shaping_config{};
+  PolicyMode _policy_mode{PolicyMode::AUTO};
   std::atomic<std::uint64_t> _request_count{};
   std::atomic<std::uint64_t> _requested_bytes{};
   std::atomic<std::uint64_t> _profiled_requests{};

@@ -180,6 +180,21 @@ def test_request_shaping_setting():
     assert kvikio.defaults.get("request_shaping_enabled") is before
 
 
+def test_policy_mode_setting():
+    before = kvikio.defaults.get("policy_mode")
+    modes = [
+        kvikio.PolicyMode.AUTO,
+        kvikio.PolicyMode.HOST_DIRECT,
+        kvikio.PolicyMode.HOST_CACHE,
+        kvikio.PolicyMode.GDS_DIRECT,
+        kvikio.PolicyMode.GDS_SHAPED,
+    ]
+    for mode in modes:
+        with kvikio.defaults.set("policy_mode", mode):
+            assert kvikio.defaults.get("policy_mode") == mode
+    assert kvikio.defaults.get("policy_mode") == before
+
+
 def test_auto_direct_io_read_overread_setting():
     before = kvikio.defaults.get("auto_direct_io_read_overread")
     with kvikio.defaults.set("auto_direct_io_read_overread", not before):

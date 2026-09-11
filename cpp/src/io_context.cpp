@@ -19,10 +19,12 @@ constexpr std::size_t io_size_threshold         = 64 * 1024;
 
 IOContext::IOContext(bool host_cache_available,
                      bool request_shaping_available,
-                     ShapingConfig shaping_config) noexcept
+                     ShapingConfig shaping_config,
+                     PolicyMode policy_mode) noexcept
   : _host_cache_available{host_cache_available},
     _request_shaping_available{request_shaping_available},
-    _shaping_config{shaping_config}
+    _shaping_config{shaping_config},
+    _policy_mode{policy_mode}
 {
   if (_shaping_config.alignment == 0) { _shaping_config.alignment = 4096; }
   reset();
@@ -114,32 +116,42 @@ void IOContext::classify() noexcept
   auto const average_size = bytes / requests;
   if (repeated * 100 >= requests * reuse_ratio_percent && average_size <= io_size_threshold) {
     _workload.store(WorkloadClass::REUSE_DOMINATED, std::memory_order_relaxed);
-    _path.store(IOPath::HOST_MEDIATED, std::memory_order_relaxed);
-    _cache.store(_host_cache_available ? CachePolicy::ADMIT : CachePolicy::BYPASS,
-                 std::memory_order_relaxed);
+    if (_policy_mode == PolicyMode::AUTO) {
+      _path.store(IOPath::HOST_MEDIATED, std::memory_order_relaxed);
+      _cache.store(_host_cache_available ? CachePolicy::ADMIT : CachePolicy::BYPASS,
+                   std::memory_order_relaxed);
+    }
   } else if (sequential * 100 >= requests * streaming_ratio_percent &&
              average_size >= io_size_threshold) {
     _workload.store(WorkloadClass::SEQUENTIAL_SCAN, std::memory_order_relaxed);
-    _path.store(IOPath::GPU_DIRECT, std::memory_order_relaxed);
-    _cache.store(CachePolicy::BYPASS, std::memory_order_relaxed);
+    if (_policy_mode == PolicyMode::AUTO) {
+      _path.store(IOPath::GPU_DIRECT, std::memory_order_relaxed);
+      _cache.store(CachePolicy::BYPASS, std::memory_order_relaxed);
+    }
   } else if (average_size < io_size_threshold && _request_shaping_available &&
              static_cast<double>(mergeable) / static_cast<double>(requests) >=
                _shaping_config.min_mergeable_ratio) {
     _workload.store(WorkloadClass::FINE_GRAINED, std::memory_order_relaxed);
-    _path.store(IOPath::GPU_DIRECT, std::memory_order_relaxed);
-    _cache.store(CachePolicy::BYPASS, std::memory_order_relaxed);
-    _submit.store(SubmitPolicy::SHAPED, std::memory_order_relaxed);
+    if (_policy_mode == PolicyMode::AUTO) {
+      _path.store(IOPath::GPU_DIRECT, std::memory_order_relaxed);
+      _cache.store(CachePolicy::BYPASS, std::memory_order_relaxed);
+      _submit.store(SubmitPolicy::SHAPED, std::memory_order_relaxed);
+    }
   } else if (average_size < io_size_threshold) {
     _workload.store(WorkloadClass::FINE_GRAINED, std::memory_order_relaxed);
-    _path.store(IOPath::HOST_MEDIATED, std::memory_order_relaxed);
-    // ADMIT means "consult region admission", not "cache every request". Cold scans are still
-    // rejected by RegionAdmission, while spatially reused lines remain eligible after profiling.
-    _cache.store(_host_cache_available ? CachePolicy::ADMIT : CachePolicy::BYPASS,
-                 std::memory_order_relaxed);
+    if (_policy_mode == PolicyMode::AUTO) {
+      _path.store(IOPath::HOST_MEDIATED, std::memory_order_relaxed);
+      // ADMIT means "consult region admission", not "cache every request". Cold scans are still
+      // rejected by RegionAdmission, while spatially reused lines remain eligible after profiling.
+      _cache.store(_host_cache_available ? CachePolicy::ADMIT : CachePolicy::BYPASS,
+                   std::memory_order_relaxed);
+    }
   } else {
     _workload.store(WorkloadClass::GENERAL, std::memory_order_relaxed);
-    _path.store(IOPath::GPU_DIRECT, std::memory_order_relaxed);
-    _cache.store(CachePolicy::BYPASS, std::memory_order_relaxed);
+    if (_policy_mode == PolicyMode::AUTO) {
+      _path.store(IOPath::GPU_DIRECT, std::memory_order_relaxed);
+      _cache.store(CachePolicy::BYPASS, std::memory_order_relaxed);
+    }
   }
   _profile_complete.store(true, std::memory_order_release);
 }
@@ -184,12 +196,41 @@ RuntimeStats IOContext::stats() const noexcept
 
 IOContextSnapshot IOContext::snapshot() const noexcept
 {
-  return {workload(), policy(), stats()};
+  return {policy_mode(), workload(), policy(), stats()};
 }
 
 bool IOContext::profile_complete() const noexcept
 {
   return _profile_complete.load(std::memory_order_acquire);
+}
+
+PolicyMode IOContext::policy_mode() const noexcept { return _policy_mode; }
+
+void IOContext::apply_forced_policy() noexcept
+{
+  switch (_policy_mode) {
+    case PolicyMode::HOST_DIRECT:
+      _path.store(IOPath::HOST_MEDIATED, std::memory_order_relaxed);
+      _cache.store(CachePolicy::BYPASS, std::memory_order_relaxed);
+      _submit.store(SubmitPolicy::DIRECT, std::memory_order_relaxed);
+      break;
+    case PolicyMode::HOST_CACHE:
+      _path.store(IOPath::HOST_MEDIATED, std::memory_order_relaxed);
+      _cache.store(CachePolicy::ADMIT, std::memory_order_relaxed);
+      _submit.store(SubmitPolicy::DIRECT, std::memory_order_relaxed);
+      break;
+    case PolicyMode::GDS_DIRECT:
+      _path.store(IOPath::GPU_DIRECT, std::memory_order_relaxed);
+      _cache.store(CachePolicy::BYPASS, std::memory_order_relaxed);
+      _submit.store(SubmitPolicy::DIRECT, std::memory_order_relaxed);
+      break;
+    case PolicyMode::GDS_SHAPED:
+      _path.store(IOPath::GPU_DIRECT, std::memory_order_relaxed);
+      _cache.store(CachePolicy::BYPASS, std::memory_order_relaxed);
+      _submit.store(SubmitPolicy::SHAPED, std::memory_order_relaxed);
+      break;
+    case PolicyMode::AUTO: break;
+  }
 }
 
 void IOContext::reset() noexcept
@@ -215,6 +256,7 @@ void IOContext::reset() noexcept
   _cache.store(_host_cache_available ? CachePolicy::ADMIT : CachePolicy::BYPASS,
                std::memory_order_relaxed);
   _submit.store(SubmitPolicy::DIRECT, std::memory_order_relaxed);
+  if (_policy_mode != PolicyMode::AUTO) { apply_forced_policy(); }
   _profile_complete.store(false, std::memory_order_release);
 }
 

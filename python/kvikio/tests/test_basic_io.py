@@ -296,6 +296,43 @@ def test_pread_observes_admission_once_per_logical_request(tmp_path):
     assert after_clear["hits"] == after_third["hits"]
 
 
+def test_forced_host_cache_is_active_on_first_request(tmp_path):
+    """HOST_CACHE creates its component and bypasses the profiling policy delay."""
+    filename = tmp_path / "test-file"
+    line_size = 64 * 1024
+    numpy.arange(line_size, dtype=numpy.uint8).tofile(filename)
+    out = cupy.empty(4096, dtype=cupy.uint8)
+
+    settings = {
+        "policy_mode": kvikio.PolicyMode.HOST_CACHE,
+        # The forced mode must activate the cache even if its AUTO-mode switch is off.
+        "host_cache_enabled": False,
+        "host_cache_capacity": 4 * line_size,
+        "host_cache_line_size": line_size,
+        "host_cache_max_io_size": 4096,
+        "host_cache_region_size": 4 * line_size,
+        "host_cache_admission_threshold": 2,
+        "host_cache_max_regions": 128,
+    }
+    with kvikio.defaults.set(settings):
+        with kvikio.CuFile(filename, "r") as f:
+            initial = f.io_context()
+            for _ in range(3):
+                assert f.pread(out, size=4096, task_size=4096).get() == 4096
+            final = f.io_context()
+            stats = f.host_cache_stats()
+
+    assert not initial["profile_complete"]
+    assert initial["policy_mode"] == "HOST_CACHE"
+    assert initial["path"] == "HOST_MEDIATED"
+    assert initial["cache"] == "ADMIT"
+    assert initial["submit"] == "DIRECT"
+    assert final["request_count"] == 3
+    assert stats["admitted_regions"] == 1
+    assert stats["cache_entries"] == 1
+    assert stats["hits"] == 1
+
+
 @pytest.mark.parametrize(
     "io_size,offsets,workload,path",
     [

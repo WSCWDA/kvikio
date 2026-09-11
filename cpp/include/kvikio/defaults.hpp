@@ -16,6 +16,7 @@
 #include <kvikio/compat_mode.hpp>
 #include <kvikio/error.hpp>
 #include <kvikio/http_status_codes.hpp>
+#include <kvikio/io_context.hpp>
 #include <kvikio/shim/cufile.hpp>
 #include <kvikio/threadpool_wrapper.hpp>
 
@@ -48,6 +49,9 @@ bool getenv_or(std::string_view env_var_name, bool default_val);
 
 template <>
 CompatMode getenv_or(std::string_view env_var_name, CompatMode default_val);
+
+template <>
+PolicyMode getenv_or(std::string_view env_var_name, PolicyMode default_val);
 
 template <>
 std::vector<int> getenv_or(std::string_view env_var_name, std::vector<int> default_val);
@@ -118,6 +122,7 @@ class defaults {
   std::size_t _bounce_buffer_size;
   bool _host_cache_enabled;
   bool _request_shaping_enabled;
+  PolicyMode _policy_mode;
   std::size_t _host_cache_capacity;
   std::size_t _host_cache_line_size;
   std::size_t _host_cache_max_io_size;
@@ -322,6 +327,15 @@ class defaults {
   /** @brief Whether new FileHandles may coalesce fine-grained device reads. */
   [[nodiscard]] static bool request_shaping_enabled();
   static void set_request_shaping_enabled(bool enabled);
+
+  /**
+   * @brief Automatic policy selection or a forced execution policy for new FileHandles.
+   *
+   * The initial value is read from `KVIKIO_POLICY_MODE`. Accepted values are `auto`,
+   * `host_direct`, `host_cache`, `gds_direct`, and `gds_shaped` (case-insensitive).
+   */
+  [[nodiscard]] static PolicyMode policy_mode();
+  static void set_policy_mode(PolicyMode mode);
 
   /** @brief Pinned-host-memory capacity reserved lazily by each cached FileHandle. */
   [[nodiscard]] static std::size_t host_cache_capacity();

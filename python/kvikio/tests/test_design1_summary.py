@@ -11,6 +11,7 @@ from pathlib import Path
 def test_design1_summary_preserves_warmup_boundary_metrics(tmp_path):
     result = {
         "case": "random_hot_small",
+        "policy_mode": "host_cache",
         "profile_requests": 64,
         "warmup_requests": 4,
         "warmup_admitted_regions": 1,
@@ -54,8 +55,10 @@ def test_design1_summary_preserves_warmup_boundary_metrics(tmp_path):
         summary = next(csv.DictReader(f))
 
     assert raw["warmup_admitted_regions"] == "1"
+    assert raw["policy_mode"] == "host_cache"
     assert raw["warmup_storage_bytes"] == str(128 * 1024)
     assert raw["cache_entries_before_measurement"] == "2"
     assert summary["warmup_admitted_regions_median"] == "1"
+    assert summary["policy_mode"] == "host_cache"
     assert summary["warmup_storage_bytes_median"] == str(128 * 1024)
     assert summary["cache_entries_before_measurement_median"] == "2"

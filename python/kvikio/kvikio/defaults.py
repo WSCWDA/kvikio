@@ -55,6 +55,7 @@ class ConfigContextManager:
             "bounce_buffer_size",
             "host_cache_enabled",
             "request_shaping_enabled",
+            "policy_mode",
             "host_cache_capacity",
             "host_cache_line_size",
             "host_cache_max_io_size",
@@ -133,6 +134,7 @@ def set(*config) -> ConfigContextManager:
         - ``"bounce_buffer_size"``
         - ``"host_cache_enabled"``
         - ``"request_shaping_enabled"``
+        - ``"policy_mode"``
         - ``"host_cache_capacity"``
         - ``"host_cache_line_size"``
         - ``"host_cache_max_io_size"``
@@ -187,6 +189,7 @@ def get(config_name: str) -> Any:
         - ``"bounce_buffer_size"``
         - ``"host_cache_enabled"``
         - ``"request_shaping_enabled"``
+        - ``"policy_mode"``
         - ``"host_cache_capacity"``
         - ``"host_cache_line_size"``
         - ``"host_cache_max_io_size"``

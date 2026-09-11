@@ -14,6 +14,12 @@ cdef extern from "<kvikio/defaults.hpp>" namespace "kvikio" nogil:
         OFF = 0
         ON = 1
         AUTO = 2
+    cpdef enum class PolicyMode(uint8_t):
+        AUTO = 0
+        HOST_DIRECT = 1
+        HOST_CACHE = 2
+        GDS_DIRECT = 3
+        GDS_SHAPED = 4
     bool cpp_is_compat_mode_preferred \
         "kvikio::defaults::is_compat_mode_preferred"() except +
     CompatMode cpp_compat_mode "kvikio::defaults::compat_mode"() except +
@@ -38,6 +44,9 @@ cdef extern from "<kvikio/defaults.hpp>" namespace "kvikio" nogil:
         "kvikio::defaults::request_shaping_enabled"() except +
     void cpp_set_request_shaping_enabled \
         "kvikio::defaults::set_request_shaping_enabled"(bool enabled) except +
+    PolicyMode cpp_policy_mode "kvikio::defaults::policy_mode"() except +
+    void cpp_set_policy_mode \
+        "kvikio::defaults::set_policy_mode"(PolicyMode mode) except +
     size_t cpp_host_cache_capacity "kvikio::defaults::host_cache_capacity"() except +
     void cpp_set_host_cache_capacity \
         "kvikio::defaults::set_host_cache_capacity"(size_t nbytes) except +
@@ -166,6 +175,14 @@ def request_shaping_enabled() -> bool:
 
 def set_request_shaping_enabled(enabled: bool) -> None:
     cpp_set_request_shaping_enabled(enabled)
+
+
+def policy_mode() -> PolicyMode:
+    return cpp_policy_mode()
+
+
+def set_policy_mode(mode: PolicyMode) -> None:
+    cpp_set_policy_mode(mode)
 
 
 def host_cache_capacity() -> int:

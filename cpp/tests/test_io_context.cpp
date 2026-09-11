@@ -4,6 +4,8 @@
  */
 
 #include <cstddef>
+#include <tuple>
+#include <vector>
 
 #include <kvikio/io_context.hpp>
 
@@ -105,4 +107,56 @@ TEST(IOContextTest, policy_is_stable_after_profile)
   EXPECT_EQ(context.policy().path, selected.path);
   EXPECT_EQ(context.policy().cache, selected.cache);
   EXPECT_EQ(context.stats().request_count, kvikio::IOContext::profile_request_limit + 256);
+}
+
+TEST(IOContextTest, forced_policy_is_active_immediately_and_survives_profile)
+{
+  using Case = std::tuple<kvikio::PolicyMode,
+                          kvikio::IOPath,
+                          kvikio::CachePolicy,
+                          kvikio::SubmitPolicy>;
+  std::vector<Case> const cases{
+    {kvikio::PolicyMode::HOST_DIRECT,
+     kvikio::IOPath::HOST_MEDIATED,
+     kvikio::CachePolicy::BYPASS,
+     kvikio::SubmitPolicy::DIRECT},
+    {kvikio::PolicyMode::HOST_CACHE,
+     kvikio::IOPath::HOST_MEDIATED,
+     kvikio::CachePolicy::ADMIT,
+     kvikio::SubmitPolicy::DIRECT},
+    {kvikio::PolicyMode::GDS_DIRECT,
+     kvikio::IOPath::GPU_DIRECT,
+     kvikio::CachePolicy::BYPASS,
+     kvikio::SubmitPolicy::DIRECT},
+    {kvikio::PolicyMode::GDS_SHAPED,
+     kvikio::IOPath::GPU_DIRECT,
+     kvikio::CachePolicy::BYPASS,
+     kvikio::SubmitPolicy::SHAPED}};
+
+  for (auto const& [mode, path, cache, submit] : cases) {
+    kvikio::IOContext context{/* host_cache_available = */ true,
+                              /* request_shaping_available = */ true,
+                              kvikio::ShapingConfig{},
+                              mode};
+    EXPECT_FALSE(context.profile_complete());
+    EXPECT_EQ(context.policy_mode(), mode);
+    EXPECT_EQ(context.policy().path, path);
+    EXPECT_EQ(context.policy().cache, cache);
+    EXPECT_EQ(context.policy().submit, submit);
+
+    for (std::size_t i = 0; i < kvikio::IOContext::profile_request_limit; ++i) {
+      context.observe(64 * 1024, i * 64 * 1024);
+    }
+    EXPECT_TRUE(context.profile_complete());
+    EXPECT_EQ(context.workload(), kvikio::WorkloadClass::SEQUENTIAL_SCAN);
+    EXPECT_EQ(context.policy().path, path);
+    EXPECT_EQ(context.policy().cache, cache);
+    EXPECT_EQ(context.policy().submit, submit);
+
+    context.reset();
+    EXPECT_FALSE(context.profile_complete());
+    EXPECT_EQ(context.policy().path, path);
+    EXPECT_EQ(context.policy().cache, cache);
+    EXPECT_EQ(context.policy().submit, submit);
+  }
 }

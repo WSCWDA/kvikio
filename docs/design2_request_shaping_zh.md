@@ -1,8 +1,9 @@
 # Design 2：放大感知的请求整形
 
-Design 2 只对满足以下条件的设备读取启用：`IOContext` 已完成 64 个逻辑请求的画像、
-稳定策略为 `GPU_DIRECT + SHAPED`、文件没有进入 compatibility mode，并且请求通过
-线程池 `pread()` 提交。同步 `read()` 和原生 `cuFileReadAsync()` 保持原语义。
+Design 2 只对满足以下条件的设备读取启用：策略为 `GPU_DIRECT + SHAPED`、文件没有进入
+compatibility mode，并且请求通过线程池 `pread()` 提交。`AUTO`模式在`IOContext`完成
+64个逻辑请求的画像后选择该策略；实验可用`PolicyMode.GDS_SHAPED`使策略从首个请求起
+固定生效。同步`read()`和原生`cuFileReadAsync()`保持原语义。
 
 ## 机制
 
@@ -38,10 +39,11 @@ kvikio.defaults.set("request_shaping_enabled", True)
 
 ## Benchmark
 
-下面的测试使用完全相同的 4 KiB、非对齐连续文件偏移请求，只通过预热阶段固定三种
-`IOContext` 策略：GDS Direct、Host-mediated 和 Shaped GDS。计时不包含 64 个画像请求。
-实际计时区域从 8 MiB+3 开始，与画像区域分离；每种模式计时前还会调用
-`POSIX_FADV_DONTNEED`，避免文件创建和画像阶段残留的 Page Cache 直接影响 Host 基线。
+下面的测试使用完全相同的4 KiB、非对齐连续文件偏移请求，通过`PolicyMode`固定
+Host Buffered、Host O_DIRECT、GDS Direct和Shaped GDS四种受控基线。它不再构造不同的
+64请求预热trace来间接诱导策略，因而四条路径从首个请求开始面对完全相同的offset trace。
+实际计时区域从8 MiB+3开始；每种模式计时前还会调用
+`POSIX_FADV_DONTNEED`，避免文件创建或前一模式残留的Page Cache直接影响Host基线。
 
 ```bash
 python -m kvikio.benchmarks.design2_request_shaping \

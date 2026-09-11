@@ -4,6 +4,42 @@
 同一FileHandle后续请求映射到预期的I/O path、cache和submit策略。该实验首先验证
 策略正确性，不把不同workload之间的IOPS差异解释为性能提升。
 
+## 自动与强制策略
+
+`PolicyMode`提供一个自动模式和四个受控基线：
+
+| Mode | 固定策略 |
+|---|---|
+| `AUTO` | 前64请求profiling后选择policy |
+| `HOST_DIRECT` | `HOST_MEDIATED/BYPASS/DIRECT` |
+| `HOST_CACHE` | `HOST_MEDIATED/ADMIT/DIRECT` |
+| `GDS_DIRECT` | `GPU_DIRECT/BYPASS/DIRECT` |
+| `GDS_SHAPED` | `GPU_DIRECT/BYPASS/SHAPED` |
+
+强制模式从FileHandle创建时立即生效，仍收集前64请求的workload特征，但profiling不会
+覆盖固定policy。`HOST_CACHE`和`GDS_SHAPED`会自动创建其所需组件。强制GDS模式不会
+被小请求的profiling阶段`gds_threshold` shortcut改成Host路径，但仍要求
+`compat_mode=OFF`且机器实际支持GDS。
+
+`PolicyMode`与其他KvikIO defaults一样是进程级配置，只影响设置之后新建的
+`FileHandle`；已经打开的handle保留创建时的模式。这里的`HOST_DIRECT`表示
+Host-mediated路径直接提交且绕过G-Route Host Cache，并不承诺底层文件描述符一定以
+Linux `O_DIRECT`打开。
+
+Python配置示例：
+
+```python
+with kvikio.defaults.set("policy_mode", kvikio.PolicyMode.GDS_DIRECT):
+    with kvikio.CuFile(path, "r") as f:
+        ...
+```
+
+也可以在进程启动前设置：
+
+```bash
+export KVIKIO_POLICY_MODE=gds_direct
+```
+
 ## 实验阶段
 
 每次运行严格分为以下阶段：
@@ -54,6 +90,19 @@ RESULT_ROOT=/mnt/gds/results/groute-design1 \
 REPEATS=5 REQUESTS=1024 BATCH_SIZE=32 \
 bash scripts/run_design1_policy.sh
 ```
+
+执行同trace五策略矩阵：
+
+```bash
+DESIGN1_FILE=/mnt/gds/groute-design1.bin \
+RESULT_ROOT=/mnt/gds/results/groute-design1-policy-matrix \
+POLICIES="auto host_direct host_cache gds_direct gds_shaped" \
+REPEATS=10 REQUESTS=8192 BATCH_SIZE=32 \
+bash scripts/run_design1_policy.sh
+```
+
+当`REQUESTS=8192`时，cold trace要求至少约512 MiB文件，建议使用1 GiB真实文件。
+`summary.csv`按`(case, policy_mode)`分别汇总，不能把不同强制策略合并为同一组。
 
 冷随机请求要求每个请求对应不同的64 KiB cache line。所需文件大小近似为：
 

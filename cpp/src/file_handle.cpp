@@ -101,9 +101,13 @@ FileHandle::FileHandle(std::string const& file_path,
 {
   KVIKIO_NVTX_FUNC_RANGE();
   _thread_pool                       = get_thread_pool_per_block_device(file_path);
-  auto const host_cache_enabled      = defaults::host_cache_enabled();
-  auto const request_shaping_enabled = defaults::request_shaping_enabled();
-  _io_context = std::make_unique<IOContext>(host_cache_enabled, request_shaping_enabled);
+  auto const policy_mode = defaults::policy_mode();
+  auto const host_cache_enabled =
+    defaults::host_cache_enabled() || policy_mode == PolicyMode::HOST_CACHE;
+  auto const request_shaping_enabled =
+    defaults::request_shaping_enabled() || policy_mode == PolicyMode::GDS_SHAPED;
+  _io_context = std::make_unique<IOContext>(
+    host_cache_enabled, request_shaping_enabled, ShapingConfig{}, policy_mode);
   if (request_shaping_enabled) {
     _request_shaper = std::make_unique<detail::RequestShaper>(_thread_pool);
   }
@@ -354,7 +358,9 @@ std::future<std::size_t> FileHandle::pread(void* buf,
   }
 
   // Shortcut that circumvent the threadpool and use the POSIX backend directly.
-  if (size < gds_threshold && (!_io_context || !_io_context->profile_complete())) {
+  if (size < gds_threshold &&
+      (!_io_context || (_io_context->policy_mode() == PolicyMode::AUTO &&
+                        !_io_context->profile_complete()))) {
     PushAndPopContext c(ctx);
     auto bytes_read = detail::posix_device_read(
       _file_direct_off.fd(), buf, size, file_offset, 0, _file_direct_on.fd());
