@@ -44,13 +44,28 @@ PROFILE_REQUESTS = 64
 REGION_SIZE = 1024 * 1024
 CACHE_LINE_SIZE = 64 * 1024
 
-POLICY_MODES = {
-    "auto": kvikio.PolicyMode.AUTO,
-    "host_direct": kvikio.PolicyMode.HOST_DIRECT,
-    "host_cache": kvikio.PolicyMode.HOST_CACHE,
-    "gds_direct": kvikio.PolicyMode.GDS_DIRECT,
-    "gds_shaped": kvikio.PolicyMode.GDS_SHAPED,
-}
+GROUTE_POLICY_NAMES = (
+    "auto",
+    "host_direct",
+    "host_cache",
+    "gds_direct",
+    "gds_shaped",
+)
+POLICY_CHOICES = (*GROUTE_POLICY_NAMES, "kvikio_threshold")
+
+# Keep this file runnable with a separately installed, unmodified KvikIO.  The
+# native threshold baseline does not expose G-Route's PolicyMode binding.
+POLICY_MODES = (
+    {
+        "auto": kvikio.PolicyMode.AUTO,
+        "host_direct": kvikio.PolicyMode.HOST_DIRECT,
+        "host_cache": kvikio.PolicyMode.HOST_CACHE,
+        "gds_direct": kvikio.PolicyMode.GDS_DIRECT,
+        "gds_shaped": kvikio.PolicyMode.GDS_SHAPED,
+    }
+    if hasattr(kvikio, "PolicyMode")
+    else {}
+)
 
 FORCED_POLICIES = {
     "host_direct": ("HOST_MEDIATED", "BYPASS", "DIRECT"),
@@ -235,60 +250,98 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         ",".join(str(offset) for offset in measured_offsets).encode("ascii")
     ).hexdigest()[:16]
 
-    settings = {
-        "compat_mode": kvikio.CompatMode.OFF,
-        "gds_threshold": 0,
-        "task_size": io_size,
-        "host_cache_enabled": args.policy in ("auto", "host_cache"),
-        "request_shaping_enabled": args.policy in ("auto", "gds_shaped"),
-        "policy_mode": POLICY_MODES[args.policy],
-        "host_cache_capacity": args.cache_bytes,
-        "host_cache_line_size": CACHE_LINE_SIZE,
-        "host_cache_max_io_size": CACHE_LINE_SIZE,
-        "host_cache_region_size": REGION_SIZE,
-        "host_cache_admission_threshold": 2,
-        "host_cache_max_regions": 4096,
-    }
+    native_threshold = args.policy == "kvikio_threshold"
+    if native_threshold:
+        if hasattr(kvikio, "PolicyMode"):
+            raise RuntimeError(
+                "kvikio_threshold must run with a separate, unmodified KvikIO "
+                f"environment; imported G-Route from {kvikio.__file__}"
+            )
+        settings = {
+            "compat_mode": kvikio.CompatMode.OFF,
+            "gds_threshold": args.kvikio_threshold,
+            "task_size": io_size,
+        }
+    else:
+        if args.policy not in POLICY_MODES:
+            raise RuntimeError(
+                f"{args.policy} requires the G-Route KvikIO build; imported "
+                f"{kvikio.__file__}"
+            )
+        settings = {
+            "compat_mode": kvikio.CompatMode.OFF,
+            "gds_threshold": 0,
+            "task_size": io_size,
+            "host_cache_enabled": args.policy in ("auto", "host_cache"),
+            "request_shaping_enabled": args.policy in ("auto", "gds_shaped"),
+            "policy_mode": POLICY_MODES[args.policy],
+            "host_cache_capacity": args.cache_bytes,
+            "host_cache_line_size": CACHE_LINE_SIZE,
+            "host_cache_max_io_size": CACHE_LINE_SIZE,
+            "host_cache_region_size": REGION_SIZE,
+            "host_cache_admission_threshold": 2,
+            "host_cache_max_regions": 4096,
+        }
     with kvikio.defaults.set(settings):
         with kvikio.CuFile(args.file, "r") as handle:
-            _submit_batched(handle, profile_offsets, io_size, args.batch_size)
-            selected = handle.io_context()
-            # Policy is retained, while cache contents and region-admission history
-            # from profiling are removed before workload measurement.
-            handle.clear_host_cache()
-            after_reset_cache = handle.host_cache_stats()
             warmup_requests = 0
-            warm_host_cache = args.case == "random_hot_small" and args.policy in (
-                "auto",
-                "host_cache",
-            )
-            if warm_host_cache:
-                # Admit and populate both hot lines before starting the timer.
-                # Keep this trace independent of --requests so even a short
-                # smoke test has a complete warm-up phase.
-                hot = measured_offsets[:2]
-                warmup_offsets = [hot[0], hot[1], hot[0], hot[1]]
-                _submit_batched(handle, warmup_offsets, io_size, args.batch_size)
-                warmup_requests = len(warmup_offsets)
-            before_cache = handle.host_cache_stats()
-            warmup_admitted_regions = (
-                before_cache["admitted_regions"]
-                - after_reset_cache["admitted_regions"]
-            )
-            warmup_storage_bytes = (
-                before_cache["storage_bytes"]
-                - after_reset_cache["storage_bytes"]
-            )
-            cache_entries_before_measurement = before_cache["cache_entries"]
-            before_shaping = handle.io_context()["shaping"]
+            warmup_admitted_regions = 0
+            warmup_storage_bytes = 0
+            cache_entries_before_measurement = 0
+            if native_threshold:
+                effective_path = (
+                    "HOST_MEDIATED"
+                    if io_size < args.kvikio_threshold
+                    else "GPU_DIRECT"
+                )
+                selected = {
+                    "workload": "NATIVE_KVIKIO",
+                    "path": effective_path,
+                    "cache": "BYPASS",
+                    "submit": "DIRECT",
+                    "policy_mode": "KVIKIO_THRESHOLD",
+                    "shaping": {},
+                }
+                before_cache = {}
+                before_shaping = {}
+            else:
+                _submit_batched(handle, profile_offsets, io_size, args.batch_size)
+                selected = handle.io_context()
+                # Retain the selected policy but remove profiling cache state.
+                handle.clear_host_cache()
+                after_reset_cache = handle.host_cache_stats()
+                warm_host_cache = args.case == "random_hot_small" and args.policy in (
+                    "auto",
+                    "host_cache",
+                )
+                if warm_host_cache:
+                    hot = measured_offsets[:2]
+                    warmup_offsets = [hot[0], hot[1], hot[0], hot[1]]
+                    _submit_batched(handle, warmup_offsets, io_size, args.batch_size)
+                    warmup_requests = len(warmup_offsets)
+                before_cache = handle.host_cache_stats()
+                warmup_admitted_regions = (
+                    before_cache["admitted_regions"]
+                    - after_reset_cache["admitted_regions"]
+                )
+                warmup_storage_bytes = (
+                    before_cache["storage_bytes"]
+                    - after_reset_cache["storage_bytes"]
+                )
+                cache_entries_before_measurement = before_cache["cache_entries"]
+                before_shaping = handle.io_context()["shaping"]
             page_cache = _control_page_cache(args.file, args.page_cache_mode)
             start = time.perf_counter()
             completed, latencies = _submit_batched(
                 handle, measured_offsets, io_size, args.batch_size
             )
             elapsed = time.perf_counter() - start
-            context = handle.io_context()
-            after_cache = handle.host_cache_stats()
+            if native_threshold:
+                context = selected
+                after_cache = {}
+            else:
+                context = handle.io_context()
+                after_cache = handle.host_cache_stats()
 
     expected_bytes = args.requests * io_size
     if completed != expected_bytes:
@@ -296,11 +349,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             f"{args.case}: completed {completed} bytes, expected {expected_bytes}"
         )
 
-    expected_workload = case["expected"][0]
+    expected_workload = "NATIVE_KVIKIO" if native_threshold else case["expected"][0]
     expected_policy = (
         case["expected"][1:]
         if args.policy == "auto"
-        else FORCED_POLICIES[args.policy]
+        else (
+            (selected["path"], "BYPASS", "DIRECT")
+            if native_threshold
+            else FORCED_POLICIES[args.policy]
+        )
     )
     actual = (
         selected["path"],
@@ -322,10 +379,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     cache_delta = {
         key: after_cache[key] - before_cache.get(key, 0) for key in after_cache
     }
-    shaping_delta = {
-        key: context["shaping"][key] - before_shaping.get(key, 0)
-        for key in context["shaping"]
-    }
+    shaping_delta = (
+        {}
+        if native_threshold
+        else {
+            key: context["shaping"][key] - before_shaping.get(key, 0)
+            for key in context["shaping"]
+        }
+    )
     if args.case == "random_cold_small" and (
         cache_delta.get("hits", 0) != 0
         or cache_delta.get("admitted_regions", 0) != 0
@@ -334,6 +395,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "random_cold_small unexpectedly reused or admitted cache data: "
             f"{cache_delta}"
         )
+    warm_host_cache = (
+        not native_threshold
+        and args.case == "random_hot_small"
+        and args.policy in ("auto", "host_cache")
+    )
     if warm_host_cache and cache_delta.get("hits", 0) != args.requests:
         raise RuntimeError(
             "random_hot_small did not remain fully cached after warm-up: "
@@ -383,10 +449,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "file_size_bytes": file_size,
         "file_allocated_bytes": file_stat.st_blocks * 512,
         "working_set_bytes": working_set_bytes,
+        "kvikio_threshold_bytes": args.kvikio_threshold if native_threshold else 0,
+        "profiling_bypassed": native_threshold,
+        "runtime_kvikio_path": str(kvikio.__file__),
         "page_cache": page_cache,
         "num_threads": kvikio.defaults.get("num_threads"),
         "requests": args.requests,
-        "profile_requests": PROFILE_REQUESTS,
+        "profile_requests": 0 if native_threshold else PROFILE_REQUESTS,
         "warmup_requests": warmup_requests,
         "warmup_admitted_regions": warmup_admitted_regions,
         "warmup_storage_bytes": warmup_storage_bytes,
@@ -413,10 +482,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--file", type=Path, required=True)
     parser.add_argument("--case", choices=CASES, required=True)
-    parser.add_argument("--policy", choices=POLICY_MODES, default="auto")
+    parser.add_argument("--policy", choices=POLICY_CHOICES, default="auto")
     parser.add_argument("--requests", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--cache-bytes", type=int, default=256 * 1024**2)
+    parser.add_argument("--kvikio-threshold", type=int, default=16 * 1024)
     parser.add_argument("--working-set-bytes", type=int)
     parser.add_argument(
         "--page-cache-mode", choices=("none", "file", "global"), default="file"
@@ -433,6 +503,8 @@ def main() -> None:
         parser.error("--batch-size must be positive")
     if args.working_set_bytes is not None and args.working_set_bytes <= 0:
         parser.error("--working-set-bytes must be positive")
+    if args.kvikio_threshold < 0:
+        parser.error("--kvikio-threshold must be non-negative")
     result = run(args)
     encoded = json.dumps(result, indent=2)
     if args.output:

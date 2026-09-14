@@ -7,6 +7,7 @@ pytest.importorskip("cupy")
 
 from kvikio.benchmarks.design1_policy import (  # noqa: E402
     FORCED_POLICIES,
+    POLICY_CHOICES,
     POLICY_MODES,
     _control_page_cache,
     _measurement_offsets,
@@ -92,3 +93,4 @@ def test_forced_policy_modes_cover_all_controlled_baselines():
         "gds_direct": ("GPU_DIRECT", "BYPASS", "DIRECT"),
         "gds_shaped": ("GPU_DIRECT", "BYPASS", "SHAPED"),
     }
+    assert set(POLICY_CHOICES) == {*POLICY_MODES, "kvikio_threshold"}

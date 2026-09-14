@@ -5,6 +5,7 @@ set -uo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PYTHON_BIN="${PYTHON_BIN:-python}"
+KVIKIO_BASELINE_PYTHON="${KVIKIO_BASELINE_PYTHON:-}"
 DESIGN1_FILE="${DESIGN1_FILE:?Set DESIGN1_FILE to an existing, non-sparse SSD file}"
 RESULT_ROOT="${RESULT_ROOT:-/tmp/groute-design1-policy}"
 REQUESTS="${REQUESTS:-1024}"
@@ -12,6 +13,7 @@ BATCH_SIZE="${BATCH_SIZE:-32}"
 REPEATS="${REPEATS:-5}"
 CASES="${CASES:-sequential_large random_cold_small random_hot_small adjacent_unaligned_small}"
 POLICIES="${POLICIES:-auto}"
+KVIKIO_THRESHOLD_BYTES="${KVIKIO_THRESHOLD_BYTES:-16384}"
 PAGE_CACHE_MODE="${PAGE_CACHE_MODE:-file}"
 WORKING_SET_BYTES="${WORKING_SET_BYTES:-}"
 ORDER_SEED="${ORDER_SEED:-20260911}"
@@ -24,9 +26,9 @@ for integer in "${REQUESTS}" "${BATCH_SIZE}" "${REPEATS}"; do
   fi
 done
 
-for integer in "${ORDER_SEED}" "${TRACE_SEED}"; do
+for integer in "${ORDER_SEED}" "${TRACE_SEED}" "${KVIKIO_THRESHOLD_BYTES}"; do
   if ! [[ "${integer}" =~ ^[0-9]+$ ]]; then
-    echo "ORDER_SEED and TRACE_SEED must be non-negative integers" >&2
+    echo "ORDER_SEED, TRACE_SEED, and KVIKIO_THRESHOLD_BYTES must be non-negative integers" >&2
     exit 2
   fi
 done
@@ -50,14 +52,33 @@ fi
 
 for policy in ${POLICIES}; do
   case "${policy}" in
-    auto | host_direct | host_cache | gds_direct | gds_shaped) ;;
+    auto | host_direct | host_cache | gds_direct | gds_shaped | kvikio_threshold) ;;
     *)
       echo "Unsupported policy '${policy}'." >&2
-      echo "Expected: auto host_direct host_cache gds_direct gds_shaped" >&2
+      echo "Expected: auto host_direct host_cache gds_direct gds_shaped kvikio_threshold" >&2
       exit 2
       ;;
   esac
 done
+
+if [[ " ${POLICIES} " == *" kvikio_threshold "* ]]; then
+  if [[ -z "${KVIKIO_BASELINE_PYTHON}" ]]; then
+    echo "KVIKIO_BASELINE_PYTHON is required for the native threshold baseline" >&2
+    echo "It must point to a separate environment containing unmodified KvikIO" >&2
+    exit 2
+  fi
+  if ! "${KVIKIO_BASELINE_PYTHON}" - <<'PY'
+import kvikio
+import sys
+
+print(f"Native KvikIO baseline: {kvikio.__file__}")
+sys.exit(1 if hasattr(kvikio, "PolicyMode") else 0)
+PY
+  then
+    echo "KVIKIO_BASELINE_PYTHON imports a G-Route build, not native KvikIO" >&2
+    exit 2
+  fi
+fi
 
 if [[ ! -f "${DESIGN1_FILE}" ]]; then
   echo "Missing benchmark file: ${DESIGN1_FILE}" >&2
@@ -116,6 +137,8 @@ fi
   echo "policies=${POLICIES}"
   echo "order_seed=${ORDER_SEED}"
   echo "trace_seed=${TRACE_SEED}"
+  echo "kvikio_threshold_bytes=${KVIKIO_THRESHOLD_BYTES}"
+  echo "kvikio_baseline_python=${KVIKIO_BASELINE_PYTHON:-not-used}"
   echo "kvikio_nthreads=${KVIKIO_NTHREADS:-default}"
   git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null | sed 's/^/git_commit=/' || true
   uname -a | sed 's/^/uname=/'
@@ -134,12 +157,17 @@ for repeat in $(seq 1 "${REPEATS}"); do
       output="${RESULT_ROOT}/${name}.json"
       log="${RESULT_ROOT}/${name}.log"
       echo "Running ${case_name}, policy=${policy}, repeat=${repeat}, order=${execution_order}"
-      if "${PYTHON_BIN}" -m kvikio.benchmarks.design1_policy \
+      runner=("${PYTHON_BIN}" -m kvikio.benchmarks.design1_policy)
+      if [[ "${policy}" == "kvikio_threshold" ]]; then
+        runner=("${KVIKIO_BASELINE_PYTHON}" "${REPO_ROOT}/python/kvikio/kvikio/benchmarks/design1_policy.py")
+      fi
+      if "${runner[@]}" \
         --file "${DESIGN1_FILE}" \
         --case "${case_name}" \
         --policy "${policy}" \
         --requests "${REQUESTS}" \
         --batch-size "${BATCH_SIZE}" \
+        --kvikio-threshold "${KVIKIO_THRESHOLD_BYTES}" \
         --page-cache-mode "${PAGE_CACHE_MODE}" \
         --repeat-id "${repeat}" \
         --execution-order "${execution_order}" \
