@@ -149,6 +149,9 @@ class FileHandle {
   /** @brief Return the per-handle workload classification, policy, and profile. */
   [[nodiscard]] IOContextSnapshot io_context_snapshot() const noexcept;
 
+  /** @brief Return whether this handle was constructed with G-Route enabled. */
+  [[nodiscard]] bool groute_enabled() const noexcept;
+
   /** @brief Return per-handle request-shaping execution counters. */
   [[nodiscard]] RequestShaperStats request_shaper_stats() const noexcept;
 

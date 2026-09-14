@@ -79,7 +79,6 @@ cdef extern from "<kvikio/file_handle.hpp>" namespace "kvikio" nogil:
         bool profile_complete
 
     cdef cppclass IOContextSnapshot:
-        bool enabled
         PolicyMode policy_mode
         WorkloadClass workload
         IOPolicy policy
@@ -165,6 +164,7 @@ cdef extern from "<kvikio/file_handle.hpp>" namespace "kvikio" nogil:
         ) except +
         bool is_direct_io_supported()
         IOContextSnapshot io_context_snapshot()
+        bool groute_enabled()
         RequestShaperStats request_shaper_stats()
         HostCacheStats host_cache_stats()
         void clear_host_cache()
@@ -229,11 +229,13 @@ cdef class CuFile:
     def io_context(self) -> dict:
         cdef IOContextSnapshot result
         cdef RequestShaperStats shaping
+        cdef bool enabled
         with nogil:
             result = self._handle.io_context_snapshot()
+            enabled = self._handle.groute_enabled()
             shaping = self._handle.request_shaper_stats()
         return {
-            "enabled": result.enabled,
+            "enabled": enabled,
             "policy_mode": (
                 "HOST_DIRECT" if result.policy_mode == PolicyMode.HOST_DIRECT else
                 "HOST_CACHE" if result.policy_mode == PolicyMode.HOST_CACHE else

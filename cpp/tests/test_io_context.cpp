@@ -20,7 +20,6 @@ TEST(IOContextTest, sequential_scan_reads_select_gds)
   }
 
   auto const snapshot = context.snapshot();
-  EXPECT_TRUE(snapshot.enabled);
   EXPECT_TRUE(snapshot.stats.profile_complete);
   EXPECT_EQ(snapshot.workload, kvikio::WorkloadClass::SEQUENTIAL_SCAN);
   EXPECT_EQ(snapshot.policy.path, kvikio::IOPath::GPU_DIRECT);

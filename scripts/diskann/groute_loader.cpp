@@ -140,13 +140,14 @@ class GRouteLoader final : public IndexLoader {
     auto const context = file_->io_context_snapshot();
     auto const cache   = file_->host_cache_stats();
     auto const shaping = file_->request_shaper_stats();
+    auto const groute_enabled = file_->groute_enabled();
     auto const effective_path =
-      !context.enabled && PAGE_SIZE < kvikio::defaults::gds_threshold()
+      !groute_enabled && PAGE_SIZE < kvikio::defaults::gds_threshold()
         ? kvikio::IOPath::HOST_MEDIATED
         : context.policy.path;
     std::cout << "[GROUTE_STATS] {\"groute_enabled\":"
-              << (context.enabled ? "true" : "false") << ",\"workload\":\""
-              << (context.enabled ? workload_name(context.workload) : "NATIVE_KVIKIO")
+              << (groute_enabled ? "true" : "false") << ",\"workload\":\""
+              << (groute_enabled ? workload_name(context.workload) : "NATIVE_KVIKIO")
               << "\",\"path\":\"" << path_name(effective_path)
               << "\",\"cache\":\"" << cache_name(context.policy.cache)
               << "\",\"submit\":\"" << submit_name(context.policy.submit)

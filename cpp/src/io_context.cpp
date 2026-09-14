@@ -196,7 +196,7 @@ RuntimeStats IOContext::stats() const noexcept
 
 IOContextSnapshot IOContext::snapshot() const noexcept
 {
-  return {true, policy_mode(), workload(), policy(), stats()};
+  return {policy_mode(), workload(), policy(), stats()};
 }
 
 bool IOContext::profile_complete() const noexcept

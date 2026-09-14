@@ -208,6 +208,8 @@ IOContextSnapshot FileHandle::io_context_snapshot() const noexcept
   return _io_context ? _io_context->snapshot() : IOContextSnapshot{};
 }
 
+bool FileHandle::groute_enabled() const noexcept { return _io_context != nullptr; }
+
 RequestShaperStats FileHandle::request_shaper_stats() const noexcept
 {
   return _request_shaper ? _request_shaper->stats() : RequestShaperStats{};

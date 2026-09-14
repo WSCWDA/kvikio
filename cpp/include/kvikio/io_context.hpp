@@ -74,7 +74,6 @@ struct RuntimeStats {
 };
 
 struct IOContextSnapshot {
-  bool enabled{};
   PolicyMode policy_mode{PolicyMode::AUTO};
   WorkloadClass workload{WorkloadClass::UNKNOWN};
   IOPolicy policy{};
