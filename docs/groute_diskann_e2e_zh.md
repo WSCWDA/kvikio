@@ -88,6 +88,17 @@ G-Route最终选择的policy、cache和shaping统计。
 `KVIKIO_POLICY_MODE`传入进程，并从每个新建KvikIO `FileHandle`的首个请求起固定执行策略；
 强制模式仍保留前64请求的workload统计，不允许分类结果覆盖策略。
 
+使用同一G-Route安装运行KvikIO原生threshold兼容基线：
+
+```bash
+POLICY_MODE=kvikio_threshold KVIKIO_THRESHOLD_BYTES=16384 \
+RESULT_ROOT=/mnt/gds/results/diskann-kvikio-threshold \
+bash scripts/run_diskann_groute_e2e.sh
+```
+
+该配置设置`KVIKIO_GROUTE_ENABLED=0`，因此不创建IOContext、Host Cache或Request
+Shaper。DiskANN的4 KiB page小于默认16 KiB阈值，将进入KvikIO已有的POSIX shortcut。
+
 ## 有效性要求
 
 1. AIO与G-Route Recall差异不超过配置容差；

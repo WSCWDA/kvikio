@@ -101,23 +101,25 @@ FileHandle::FileHandle(std::string const& file_path,
 {
   KVIKIO_NVTX_FUNC_RANGE();
   _thread_pool                       = get_thread_pool_per_block_device(file_path);
-  auto const policy_mode = defaults::policy_mode();
-  auto const host_cache_enabled =
-    defaults::host_cache_enabled() || policy_mode == PolicyMode::HOST_CACHE;
-  auto const request_shaping_enabled =
-    defaults::request_shaping_enabled() || policy_mode == PolicyMode::GDS_SHAPED;
-  _io_context = std::make_unique<IOContext>(
-    host_cache_enabled, request_shaping_enabled, ShapingConfig{}, policy_mode);
-  if (request_shaping_enabled) {
-    _request_shaper = std::make_unique<detail::RequestShaper>(_thread_pool);
-  }
-  if (host_cache_enabled) {
-    _host_cache = std::make_unique<detail::HostCache>(defaults::host_cache_capacity(),
-                                                      defaults::host_cache_line_size(),
-                                                      defaults::host_cache_max_io_size(),
-                                                      defaults::host_cache_region_size(),
-                                                      defaults::host_cache_admission_threshold(),
-                                                      defaults::host_cache_max_regions());
+  if (defaults::groute_enabled()) {
+    auto const policy_mode = defaults::policy_mode();
+    auto const host_cache_enabled =
+      defaults::host_cache_enabled() || policy_mode == PolicyMode::HOST_CACHE;
+    auto const request_shaping_enabled =
+      defaults::request_shaping_enabled() || policy_mode == PolicyMode::GDS_SHAPED;
+    _io_context = std::make_unique<IOContext>(
+      host_cache_enabled, request_shaping_enabled, ShapingConfig{}, policy_mode);
+    if (request_shaping_enabled) {
+      _request_shaper = std::make_unique<detail::RequestShaper>(_thread_pool);
+    }
+    if (host_cache_enabled) {
+      _host_cache = std::make_unique<detail::HostCache>(defaults::host_cache_capacity(),
+                                                        defaults::host_cache_line_size(),
+                                                        defaults::host_cache_max_io_size(),
+                                                        defaults::host_cache_region_size(),
+                                                        defaults::host_cache_admission_threshold(),
+                                                        defaults::host_cache_max_regions());
+    }
   }
 }
 

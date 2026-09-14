@@ -29,6 +29,7 @@ RESULT_ROOT="${RESULT_ROOT:-/tmp/groute-diskann-e2e}"
 DROP_CACHES="${DROP_CACHES:-0}"
 KVIKIO_THREADS="${KVIKIO_THREADS:-${SEARCH_THREADS}}"
 POLICY_MODE="${POLICY_MODE:-auto}"
+KVIKIO_THRESHOLD_BYTES="${KVIKIO_THRESHOLD_BYTES:-16384}"
 
 for path in "${GUSTANN_BIN}" "${INDEX_FILE}" "${QUERY_FILE}" "${GT_FILE}"; do
   if [[ ! -f "${path}" ]]; then
@@ -51,6 +52,10 @@ for integer in "${TOPK}" "${EF_SEARCH}" "${MINIBATCH}" "${SEARCH_THREADS}" \
     exit 2
   fi
 done
+if ! [[ "${KVIKIO_THRESHOLD_BYTES}" =~ ^[0-9]+$ ]]; then
+  echo "KVIKIO_THRESHOLD_BYTES must be a non-negative integer" >&2
+  exit 2
+fi
 if (( EF_SEARCH < TOPK )); then
   echo "EF_SEARCH must be at least TOPK" >&2
   exit 2
@@ -67,7 +72,7 @@ for mode in "${mode_array[@]}"; do
   fi
 done
 case "${POLICY_MODE}" in
-  auto | host_direct | host_cache | gds_direct | gds_shaped) ;;
+  auto | host_direct | host_cache | gds_direct | gds_shaped | kvikio_threshold) ;;
   *)
     echo "Unsupported POLICY_MODE: ${POLICY_MODE}" >&2
     exit 2
@@ -98,12 +103,22 @@ run_one() {
   echo "Running backend=${mode}, repeat=${repeat}"
   drop_linux_caches
 
+  local groute_enabled=1
+  local gds_threshold=0
+  local effective_policy_mode="${POLICY_MODE}"
+  if [[ "${POLICY_MODE}" == "kvikio_threshold" ]]; then
+    groute_enabled=0
+    gds_threshold="${KVIKIO_THRESHOLD_BYTES}"
+    effective_policy_mode=auto
+  fi
+
   if env \
       KVIKIO_COMPAT_MODE=OFF \
-      KVIKIO_GDS_THRESHOLD=0 \
+      KVIKIO_GROUTE_ENABLED="${groute_enabled}" \
+      KVIKIO_GDS_THRESHOLD="${gds_threshold}" \
       KVIKIO_TASK_SIZE=4096 \
       KVIKIO_NTHREADS="${KVIKIO_THREADS}" \
-      KVIKIO_POLICY_MODE="${POLICY_MODE}" \
+      KVIKIO_POLICY_MODE="${effective_policy_mode}" \
       KVIKIO_HOST_CACHE=1 \
       KVIKIO_HOST_CACHE_CAPACITY="${KVIKIO_HOST_CACHE_CAPACITY:-1073741824}" \
       KVIKIO_HOST_CACHE_LINE_SIZE="${KVIKIO_HOST_CACHE_LINE_SIZE:-65536}" \

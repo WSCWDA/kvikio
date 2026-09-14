@@ -65,6 +65,7 @@ def parse_log(path: Path, total_queries: int) -> dict[str, Any]:
         "recall": float(one(REPORT_RECALL, text, "recall report")),
         "page_reads": int(one(REPORT_IO, text, "I/O report")),
         "mean_thread_latency_ms": statistics.mean(latency),
+        "groute_enabled": stats.get("groute_enabled", ""),
         "workload": stats.get("workload", ""),
         "path": stats.get("path", ""),
         "cache": stats.get("cache", ""),
@@ -134,6 +135,9 @@ def main() -> None:
                     int(row["page_reads"]) for row in group
                 ),
                 "selected_policy": "|".join(policies),
+                "groute_enabled": "|".join(
+                    sorted({str(row["groute_enabled"]) for row in group})
+                ),
                 "cache_hits_median": statistics.median(
                     int(row["cache_hits"]) for row in group
                 ),

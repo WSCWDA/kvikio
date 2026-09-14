@@ -53,19 +53,13 @@ GROUTE_POLICY_NAMES = (
 )
 POLICY_CHOICES = (*GROUTE_POLICY_NAMES, "kvikio_threshold")
 
-# Keep this file runnable with a separately installed, unmodified KvikIO.  The
-# native threshold baseline does not expose G-Route's PolicyMode binding.
-POLICY_MODES = (
-    {
-        "auto": kvikio.PolicyMode.AUTO,
-        "host_direct": kvikio.PolicyMode.HOST_DIRECT,
-        "host_cache": kvikio.PolicyMode.HOST_CACHE,
-        "gds_direct": kvikio.PolicyMode.GDS_DIRECT,
-        "gds_shaped": kvikio.PolicyMode.GDS_SHAPED,
-    }
-    if hasattr(kvikio, "PolicyMode")
-    else {}
-)
+POLICY_MODES = {
+    "auto": kvikio.PolicyMode.AUTO,
+    "host_direct": kvikio.PolicyMode.HOST_DIRECT,
+    "host_cache": kvikio.PolicyMode.HOST_CACHE,
+    "gds_direct": kvikio.PolicyMode.GDS_DIRECT,
+    "gds_shaped": kvikio.PolicyMode.GDS_SHAPED,
+}
 
 FORCED_POLICIES = {
     "host_direct": ("HOST_MEDIATED", "BYPASS", "DIRECT"),
@@ -252,26 +246,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     native_threshold = args.policy == "kvikio_threshold"
     if native_threshold:
-        if hasattr(kvikio, "PolicyMode"):
-            raise RuntimeError(
-                "kvikio_threshold must run with a separate, unmodified KvikIO "
-                f"environment; imported G-Route from {kvikio.__file__}"
-            )
         settings = {
             "compat_mode": kvikio.CompatMode.OFF,
             "gds_threshold": args.kvikio_threshold,
             "task_size": io_size,
+            "groute_enabled": False,
         }
     else:
-        if args.policy not in POLICY_MODES:
-            raise RuntimeError(
-                f"{args.policy} requires the G-Route KvikIO build; imported "
-                f"{kvikio.__file__}"
-            )
         settings = {
             "compat_mode": kvikio.CompatMode.OFF,
             "gds_threshold": 0,
             "task_size": io_size,
+            "groute_enabled": True,
             "host_cache_enabled": args.policy in ("auto", "host_cache"),
             "request_shaping_enabled": args.policy in ("auto", "gds_shaped"),
             "policy_mode": POLICY_MODES[args.policy],
@@ -289,12 +275,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             warmup_storage_bytes = 0
             cache_entries_before_measurement = 0
             if native_threshold:
+                disabled_context = handle.io_context()
+                if disabled_context["enabled"]:
+                    raise RuntimeError(
+                        "kvikio_threshold unexpectedly created a G-Route IOContext"
+                    )
                 effective_path = (
                     "HOST_MEDIATED"
                     if io_size < args.kvikio_threshold
                     else "GPU_DIRECT"
                 )
                 selected = {
+                    "enabled": False,
                     "workload": "NATIVE_KVIKIO",
                     "path": effective_path,
                     "cache": "BYPASS",
@@ -307,6 +299,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             else:
                 _submit_batched(handle, profile_offsets, io_size, args.batch_size)
                 selected = handle.io_context()
+                if not selected["enabled"]:
+                    raise RuntimeError(f"{args.policy} did not enable G-Route")
                 # Retain the selected policy but remove profiling cache state.
                 handle.clear_host_cache()
                 after_reset_cache = handle.host_cache_stats()
@@ -451,6 +445,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "working_set_bytes": working_set_bytes,
         "kvikio_threshold_bytes": args.kvikio_threshold if native_threshold else 0,
         "profiling_bypassed": native_threshold,
+        "groute_enabled": not native_threshold,
         "runtime_kvikio_path": str(kvikio.__file__),
         "page_cache": page_cache,
         "num_threads": kvikio.defaults.get("num_threads"),

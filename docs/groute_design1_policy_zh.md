@@ -17,9 +17,9 @@
 | `GDS_SHAPED` | `GPU_DIRECT/BYPASS/SHAPED` |
 
 官方KvikIO的size-only threshold不属于`PolicyMode`。实验标签
-`kvikio_threshold`会启动一个独立的、未修改KvikIO环境，仅设置
-`KVIKIO_GDS_THRESHOLD`；该进程不会加载G-Route的IOContext、Host Cache或Request
-Shaper。这样测到的是官方实现，而不是G-Route内部模拟出来的threshold分支。
+`kvikio_threshold`通过`KVIKIO_GROUTE_ENABLED=0`完全跳过IOContext、Host Cache和
+Request Shaper，并只设置`KVIKIO_GDS_THRESHOLD`。因此同一个KvikIO安装即可在原生
+threshold路径和G-Route之间切换，且不会在G-Route内部模拟一种threshold policy。
 
 强制模式从FileHandle创建时立即生效，仍收集前64请求的workload特征，但profiling不会
 覆盖固定policy。`HOST_CACHE`和`GDS_SHAPED`会自动创建其所需组件。强制GDS模式不会
@@ -137,14 +137,10 @@ bash scripts/run_design1_policy.sh
 DESIGN1_FILE=/mnt/gds/cwd_test/design2-cold-272g.bin
 WORKING_SET_BYTES=$(stat -c %s "$DESIGN1_FILE")
 
-# 独立环境中的官方、未修改KvikIO；不能指向当前G-Route环境。
-KVIKIO_BASELINE_PYTHON=/opt/conda/envs/kvikio-upstream/bin/python
-
 DESIGN1_FILE="$DESIGN1_FILE" \
 WORKING_SET_BYTES="$WORKING_SET_BYTES" \
 RESULT_ROOT=/mnt/gds/results/groute-design1-policy-matrix \
 POLICIES="auto kvikio_threshold host_direct host_cache gds_direct gds_shaped" \
-KVIKIO_BASELINE_PYTHON="$KVIKIO_BASELINE_PYTHON" \
 KVIKIO_THRESHOLD_BYTES=16384 \
 PAGE_CACHE_MODE=global \
 ORDER_SEED=20260911 TRACE_SEED=20260910 \
@@ -158,9 +154,10 @@ bash scripts/run_design1_policy.sh
 `trace_id`不一致的数据。这样可用配对统计比较AUTO、官方threshold和四种强制策略，而不会把trace差异或
 固定顺序误当成policy收益。
 
-脚本会拒绝把包含`PolicyMode`绑定的G-Route Python解释器用作官方threshold基线，并在
-JSON/CSV中记录`runtime_kvikio_path`、`kvikio_threshold_bytes`和
-`profiling_bypassed`。这三个字段用于证明基线来自独立运行时且未执行G-Route profiling。
+脚本在每个独立Python进程中设置`groute_enabled`。JSON/CSV记录`groute_enabled`、
+`runtime_kvikio_path`、`kvikio_threshold_bytes`和`profiling_bypassed`；threshold行必须
+满足`groute_enabled=false`、`profiling_bypassed=true`且IOContext snapshot中的
+`enabled=false`。
 
 脚本还生成`experiment_metadata.txt`，记录commit、kernel、GPU、线程数、数据文件逻辑与
 物理大小、working set、cache模式和随机种子。归档论文数据时应将它与JSON和CSV一起保存。

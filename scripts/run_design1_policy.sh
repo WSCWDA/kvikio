@@ -5,7 +5,6 @@ set -uo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PYTHON_BIN="${PYTHON_BIN:-python}"
-KVIKIO_BASELINE_PYTHON="${KVIKIO_BASELINE_PYTHON:-}"
 DESIGN1_FILE="${DESIGN1_FILE:?Set DESIGN1_FILE to an existing, non-sparse SSD file}"
 RESULT_ROOT="${RESULT_ROOT:-/tmp/groute-design1-policy}"
 REQUESTS="${REQUESTS:-1024}"
@@ -60,25 +59,6 @@ for policy in ${POLICIES}; do
       ;;
   esac
 done
-
-if [[ " ${POLICIES} " == *" kvikio_threshold "* ]]; then
-  if [[ -z "${KVIKIO_BASELINE_PYTHON}" ]]; then
-    echo "KVIKIO_BASELINE_PYTHON is required for the native threshold baseline" >&2
-    echo "It must point to a separate environment containing unmodified KvikIO" >&2
-    exit 2
-  fi
-  if ! "${KVIKIO_BASELINE_PYTHON}" - <<'PY'
-import kvikio
-import sys
-
-print(f"Native KvikIO baseline: {kvikio.__file__}")
-sys.exit(1 if hasattr(kvikio, "PolicyMode") else 0)
-PY
-  then
-    echo "KVIKIO_BASELINE_PYTHON imports a G-Route build, not native KvikIO" >&2
-    exit 2
-  fi
-fi
 
 if [[ ! -f "${DESIGN1_FILE}" ]]; then
   echo "Missing benchmark file: ${DESIGN1_FILE}" >&2
@@ -138,7 +118,7 @@ fi
   echo "order_seed=${ORDER_SEED}"
   echo "trace_seed=${TRACE_SEED}"
   echo "kvikio_threshold_bytes=${KVIKIO_THRESHOLD_BYTES}"
-  echo "kvikio_baseline_python=${KVIKIO_BASELINE_PYTHON:-not-used}"
+  echo "python_bin=${PYTHON_BIN}"
   echo "kvikio_nthreads=${KVIKIO_NTHREADS:-default}"
   git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null | sed 's/^/git_commit=/' || true
   uname -a | sed 's/^/uname=/'
@@ -157,11 +137,7 @@ for repeat in $(seq 1 "${REPEATS}"); do
       output="${RESULT_ROOT}/${name}.json"
       log="${RESULT_ROOT}/${name}.log"
       echo "Running ${case_name}, policy=${policy}, repeat=${repeat}, order=${execution_order}"
-      runner=("${PYTHON_BIN}" -m kvikio.benchmarks.design1_policy)
-      if [[ "${policy}" == "kvikio_threshold" ]]; then
-        runner=("${KVIKIO_BASELINE_PYTHON}" "${REPO_ROOT}/python/kvikio/kvikio/benchmarks/design1_policy.py")
-      fi
-      if "${runner[@]}" \
+      if "${PYTHON_BIN}" -m kvikio.benchmarks.design1_policy \
         --file "${DESIGN1_FILE}" \
         --case "${case_name}" \
         --policy "${policy}" \

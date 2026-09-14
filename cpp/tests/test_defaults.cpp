@@ -70,6 +70,14 @@ TEST(DefaultsTest, parse_http_status_codes)
   }
 }
 
+TEST(DefaultsTest, groute_enabled)
+{
+  auto const before = kvikio::defaults::groute_enabled();
+  kvikio::defaults::set_groute_enabled(!before);
+  EXPECT_EQ(kvikio::defaults::groute_enabled(), !before);
+  kvikio::defaults::set_groute_enabled(before);
+}
+
 TEST(DefaultsTest, alias_for_getenv_or)
 {
   // Passed initializer list is empty

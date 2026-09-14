@@ -37,6 +37,9 @@ cdef extern from "<kvikio/defaults.hpp>" namespace "kvikio" nogil:
     size_t cpp_bounce_buffer_size "kvikio::defaults::bounce_buffer_size"() except +
     void cpp_set_bounce_buffer_size \
         "kvikio::defaults::set_bounce_buffer_size"(size_t nbytes) except +
+    bool cpp_groute_enabled "kvikio::defaults::groute_enabled"() except +
+    void cpp_set_groute_enabled \
+        "kvikio::defaults::set_groute_enabled"(bool enabled) except +
     bool cpp_host_cache_enabled "kvikio::defaults::host_cache_enabled"() except +
     void cpp_set_host_cache_enabled \
         "kvikio::defaults::set_host_cache_enabled"(bool enabled) except +
@@ -159,6 +162,14 @@ def set_bounce_buffer_size(nbytes: int) -> None:
     cdef size_t cpp_nbytes = nbytes
     with nogil:
         cpp_set_bounce_buffer_size(cpp_nbytes)
+
+
+def groute_enabled() -> bool:
+    return cpp_groute_enabled()
+
+
+def set_groute_enabled(enabled: bool) -> None:
+    cpp_set_groute_enabled(enabled)
 
 
 def host_cache_enabled() -> bool:

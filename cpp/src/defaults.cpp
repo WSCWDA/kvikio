@@ -140,6 +140,10 @@ defaults::defaults()
       env > 0, "KVIKIO_BOUNCE_BUFFER_SIZE has to be a positive integer", std::invalid_argument);
     _bounce_buffer_size = env;
   }
+  // Master switch for all G-Route components. Read when a FileHandle is constructed.
+  {
+    _groute_enabled = getenv_or("KVIKIO_GROUTE_ENABLED", true);
+  }
   // Host cache is opt-in. The pinned allocation is made lazily on the first eligible read.
   {
     _host_cache_enabled = getenv_or("KVIKIO_HOST_CACHE", false);
@@ -283,6 +287,10 @@ void defaults::set_bounce_buffer_size(std::size_t nbytes)
     nbytes > 0, "size of the bounce buffer must be a positive integer", std::invalid_argument);
   instance()->_bounce_buffer_size = nbytes;
 }
+
+bool defaults::groute_enabled() { return instance()->_groute_enabled; }
+
+void defaults::set_groute_enabled(bool enabled) { instance()->_groute_enabled = enabled; }
 
 bool defaults::host_cache_enabled() { return instance()->_host_cache_enabled; }
 

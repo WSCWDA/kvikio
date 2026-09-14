@@ -120,6 +120,7 @@ class defaults {
   std::size_t _task_size;
   std::size_t _gds_threshold;
   std::size_t _bounce_buffer_size;
+  bool _groute_enabled;
   bool _host_cache_enabled;
   bool _request_shaping_enabled;
   PolicyMode _policy_mode;
@@ -319,6 +320,15 @@ class defaults {
    * @param nbytes The bounce buffer size in bytes.
    */
   static void set_bounce_buffer_size(std::size_t nbytes);
+
+  /**
+   * @brief Whether new FileHandles enable G-Route policy, cache, and shaping components.
+   *
+   * The initial value is read from `KVIKIO_GROUTE_ENABLED` and defaults to true. Disabling
+   * G-Route restores KvikIO's native size-threshold dispatch for new FileHandles.
+   */
+  [[nodiscard]] static bool groute_enabled();
+  static void set_groute_enabled(bool enabled);
 
   /** @brief Whether new FileHandles use the small-read host cache. */
   [[nodiscard]] static bool host_cache_enabled();

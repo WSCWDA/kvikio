@@ -39,6 +39,14 @@ In order to improve performance of small IO, ``.pread()`` and ``.pwrite()`` impl
 
 This setting can be queried (:py:func:`kvikio.defaults.get`) and modified (:py:func:`kvikio.defaults.set`) at runtime using the property name ``gds_threshold``.
 
+G-Route ``KVIKIO_GROUTE_ENABLED``
+---------------------------------
+
+Set ``KVIKIO_GROUTE_ENABLED=0`` to disable G-Route for newly constructed ``FileHandle`` objects.
+Disabled handles do not create an IOContext, host cache, or request shaper and retain KvikIO's
+native ``gds_threshold`` dispatch. The default is enabled. The equivalent runtime property is
+``groute_enabled``; changing it does not alter handles that are already open.
+
 Size of the Bounce Buffer ``KVIKIO_BOUNCE_BUFFER_SIZE``
 -------------------------------------------------------
 KvikIO might have to use intermediate host buffers (one per thread) when copying between files and device memory. Set the environment variable ``KVIKIO_BOUNCE_BUFFER_SIZE`` to the size (in bytes) of these "bounce" buffers. If not set, the default value is 16777216 (16 MiB).

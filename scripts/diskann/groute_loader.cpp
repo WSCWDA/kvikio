@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include <kvikio/defaults.hpp>
 #include <kvikio/file_handle.hpp>
 
 namespace gustann {
@@ -81,7 +82,7 @@ class GRouteLoader final : public IndexLoader {
                                                PAGE_SIZE,
                                                offset,
                                                PAGE_SIZE,
-                                               0,
+                                               kvikio::defaults::gds_threshold(),
                                                false));
     }
   }
@@ -139,8 +140,14 @@ class GRouteLoader final : public IndexLoader {
     auto const context = file_->io_context_snapshot();
     auto const cache   = file_->host_cache_stats();
     auto const shaping = file_->request_shaper_stats();
-    std::cout << "[GROUTE_STATS] {\"workload\":\"" << workload_name(context.workload)
-              << "\",\"path\":\"" << path_name(context.policy.path)
+    auto const effective_path =
+      !context.enabled && PAGE_SIZE < kvikio::defaults::gds_threshold()
+        ? kvikio::IOPath::HOST_MEDIATED
+        : context.policy.path;
+    std::cout << "[GROUTE_STATS] {\"groute_enabled\":"
+              << (context.enabled ? "true" : "false") << ",\"workload\":\""
+              << (context.enabled ? workload_name(context.workload) : "NATIVE_KVIKIO")
+              << "\",\"path\":\"" << path_name(effective_path)
               << "\",\"cache\":\"" << cache_name(context.policy.cache)
               << "\",\"submit\":\"" << submit_name(context.policy.submit)
               << "\",\"logical_requests\":" << context.stats.request_count

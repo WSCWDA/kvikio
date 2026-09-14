@@ -79,6 +79,7 @@ cdef extern from "<kvikio/file_handle.hpp>" namespace "kvikio" nogil:
         bool profile_complete
 
     cdef cppclass IOContextSnapshot:
+        bool enabled
         PolicyMode policy_mode
         WorkloadClass workload
         IOPolicy policy
@@ -232,6 +233,7 @@ cdef class CuFile:
             result = self._handle.io_context_snapshot()
             shaping = self._handle.request_shaper_stats()
         return {
+            "enabled": result.enabled,
             "policy_mode": (
                 "HOST_DIRECT" if result.policy_mode == PolicyMode.HOST_DIRECT else
                 "HOST_CACHE" if result.policy_mode == PolicyMode.HOST_CACHE else

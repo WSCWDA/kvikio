@@ -53,6 +53,7 @@ class ConfigContextManager:
             "task_size",
             "gds_threshold",
             "bounce_buffer_size",
+            "groute_enabled",
             "host_cache_enabled",
             "request_shaping_enabled",
             "policy_mode",
@@ -132,6 +133,7 @@ def set(*config) -> ConfigContextManager:
         - ``"task_size"``
         - ``"gds_threshold"``
         - ``"bounce_buffer_size"``
+        - ``"groute_enabled"``
         - ``"host_cache_enabled"``
         - ``"request_shaping_enabled"``
         - ``"policy_mode"``
@@ -187,6 +189,7 @@ def get(config_name: str) -> Any:
         - ``"task_size"``
         - ``"gds_threshold"``
         - ``"bounce_buffer_size"``
+        - ``"groute_enabled"``
         - ``"host_cache_enabled"``
         - ``"request_shaping_enabled"``
         - ``"policy_mode"``

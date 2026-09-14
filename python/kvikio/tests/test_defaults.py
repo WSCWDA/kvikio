@@ -173,6 +173,13 @@ def test_host_cache_settings():
         kvikio.defaults.set("host_cache_max_regions", 0)
 
 
+def test_groute_enabled_setting():
+    before = kvikio.defaults.get("groute_enabled")
+    with kvikio.defaults.set("groute_enabled", not before):
+        assert kvikio.defaults.get("groute_enabled") is not before
+    assert kvikio.defaults.get("groute_enabled") is before
+
+
 def test_request_shaping_setting():
     before = kvikio.defaults.get("request_shaping_enabled")
     with kvikio.defaults.set("request_shaping_enabled", True):

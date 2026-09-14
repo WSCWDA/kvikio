@@ -333,6 +333,49 @@ def test_forced_host_cache_is_active_on_first_request(tmp_path):
     assert stats["hits"] == 1
 
 
+def test_groute_disabled_bypasses_context_cache_and_shaping(tmp_path):
+    filename = tmp_path / "test-file"
+    numpy.arange(64 * 1024, dtype=numpy.uint8).tofile(filename)
+    out = cupy.empty(4096, dtype=cupy.uint8)
+
+    with kvikio.defaults.set(
+        {
+            "groute_enabled": False,
+            "gds_threshold": 16 * 1024,
+            # The master switch must override the component switches.
+            "host_cache_enabled": True,
+            "request_shaping_enabled": True,
+        }
+    ):
+        with kvikio.CuFile(filename, "r") as f:
+            assert f.pread(out, size=4096, task_size=4096).get() == 4096
+            cupy.testing.assert_array_equal(
+                out, cupy.asarray(numpy.arange(4096, dtype=numpy.uint8))
+            )
+            context = f.io_context()
+            cache = f.host_cache_stats()
+
+    assert context["enabled"] is False
+    assert context["request_count"] == 0
+    assert context["profiled_requests"] == 0
+    assert context["shaping"]["logical_requests"] == 0
+    assert cache["hits"] == 0
+    assert cache["misses"] == 0
+
+
+def test_groute_switch_only_affects_new_handles(tmp_path):
+    filename = tmp_path / "test-file"
+    numpy.arange(4096, dtype=numpy.uint8).tofile(filename)
+
+    with kvikio.defaults.set("groute_enabled", False):
+        with kvikio.CuFile(filename, "r") as disabled_handle:
+            assert disabled_handle.io_context()["enabled"] is False
+            with kvikio.defaults.set("groute_enabled", True):
+                with kvikio.CuFile(filename, "r") as enabled_handle:
+                    assert enabled_handle.io_context()["enabled"] is True
+                assert disabled_handle.io_context()["enabled"] is False
+
+
 @pytest.mark.parametrize(
     "io_size,offsets,workload,path",
     [
