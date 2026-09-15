@@ -22,6 +22,7 @@ KvikIO also works efficiently when GDS isn't available and can read/write both h
  * C++: <https://docs.rapids.ai/api/libkvikio/nightly/>
  * G-Route Design 1 evaluation: [docs/groute_design1_policy_zh.md](docs/groute_design1_policy_zh.md)
  * G-Route DiskANN end-to-end evaluation: [docs/groute_diskann_e2e_zh.md](docs/groute_diskann_e2e_zh.md)
+ * G-Route BFS/PageRank end-to-end evaluation: [docs/groute_graph_e2e_zh.md](docs/groute_graph_e2e_zh.md)
 
 
 ### Examples
