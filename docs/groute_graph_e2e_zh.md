@@ -95,6 +95,56 @@ bash scripts/run_graph_e2e_matrix.sh
 
 `PAGE_CACHE_MODE=global` 需要 root，并在每个策略进程前清除 Linux page cache。没有 root 时使用 `PAGE_CACHE_MODE=file`；论文必须报告所用模式。
 
+### 按 BFS 层检查策略是否被启动阶段误导
+
+更新并重新构建图执行器后，可先只运行三个关键策略；使用新的结果目录，不混入旧版 JSON：
+
+```bash
+bash scripts/build_graph_e2e.sh
+GRAPH_PREFIX=/home/cwd/dataset/bafsdata/mtx_all/GAP-kron.bel \
+RESULT_ROOT=/mnt/gds/results/groute-kron-bfs-levels \
+ALGORITHMS=bfs \
+POLICIES="kvikio_threshold auto host_direct" \
+REPEATS=1 BFS_SOURCE=1 BFS_MAX_LEVELS=100 \
+BATCH_REQUESTS=1024 PAGE_CACHE_MODE=global PLOT=0 \
+bash scripts/run_graph_e2e_matrix.sh
+```
+
+每完成一层，`e2e_bfs_<policy>_r1.log` 会立即打印一行 `BFS layer=...`。完成后，
+每个 JSON 的 `bfs_levels` 数组记录该层的 `logical_requests`、
+`average_io_size`、精确的 `p50_io_size`、`io_seconds`、`layer_seconds`、
+`policy_start` 和 `policy_end`。零邻接请求的层将平均值、中位数及 I/O 时间记录为零。
+原生 KvikIO 阈值基线的策略显示为 `KVIKIO_THRESHOLD`，因为它按请求大小派发，
+没有 FileHandle 级别的固定路径。
+
+`io_seconds` 是主机线程调用 `pread` 提交请求及等待 futures 完成时的累计时间；
+同步 Host Cache 读也在其中。它不包含等待 GPU kernel 完成的时间，I/O 与 kernel
+可能重叠，不能用作独立的 SSD 读取时间。`layer_seconds` 是从开始排序 frontier
+到下一层 frontier 拷回主机的墙钟时间，包含请求规划、I/O 和 GPU 计算。
+
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
+
+root = Path('/mnt/gds/results/groute-kron-bfs-levels')
+for path in sorted(root.glob('e2e_bfs_*.json')):
+    result = json.loads(path.read_text())
+    print('\n', result['policy_mode'])
+    print('layer  requests      mean_B   p50_B   io_s     layer_s  policy_start -> policy_end')
+    for level in result['bfs_levels']:
+        print(f"{level['layer']:>5}  {level['logical_requests']:>12} "
+              f"{level['average_io_size']:>8.1f} "
+              f"{level['p50_io_size']:>7.1f} "
+              f"{level['io_seconds']:>8.2f} "
+              f"{level['layer_seconds']:>8.2f}  "
+              f"{level['policy_start']} -> {level['policy_end']}")
+PY
+```
+
+比较 Auto 第一层及后续各层的请求大小和策略即可确认早期采样是否代表主体工作量；
+比较同一层三个策略的 `layer_seconds` 才能判断路径选择带来的端到端影响。
+
 脚本生成：
 
 - `raw_results.csv`：每次运行的原始数据；

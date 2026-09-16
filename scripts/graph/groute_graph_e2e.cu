@@ -23,6 +23,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -452,6 +453,28 @@ char const* policy_mode_name(kvikio::PolicyMode value)
   return "AUTO";
 }
 
+std::string policy_label(kvikio::FileHandle const& file, Options const& options)
+{
+  // The native threshold dispatches each request separately; its context snapshot is empty.
+  if (options.policy == "kvikio_threshold") { return "KVIKIO_THRESHOLD"; }
+  auto const policy = file.io_context_snapshot().policy;
+  return std::string{path_name(policy.path)} + "/" + cache_name(policy.cache) + "/" +
+         submit_name(policy.submit);
+}
+
+struct BFSLevelStats {
+  std::uint32_t layer{};
+  std::uint64_t frontier_vertices{};
+  std::uint64_t logical_requests{};
+  std::uint64_t logical_bytes{};
+  double average_io_size{};
+  double p50_io_size{};
+  double io_seconds{};     // Host time in pread submission and future completion waits.
+  double layer_seconds{};  // Includes planning, I/O, and GPU execution.
+  std::string policy_start;
+  std::string policy_end;
+};
+
 struct Result {
   std::uint32_t iterations{};
   std::uint64_t visited{};
@@ -461,10 +484,14 @@ struct Result {
   double job_seconds{};
   std::uint64_t trace_hash{1469598103934665603ULL};
   std::uint64_t result_hash{};
+  std::vector<BFSLevelStats> bfs_levels;
 };
 
-void update_trace_hash(Result& result, std::vector<Batch> const& batches)
+void update_trace_hash(Result& result,
+                       std::vector<Batch> const& batches,
+                       BFSLevelStats* level = nullptr)
 {
+  std::unordered_map<std::uint32_t, std::uint64_t> size_histogram;
   for (auto const& batch : batches) {
     for (auto const& request : batch) {
       result.trace_hash =
@@ -473,27 +500,72 @@ void update_trace_hash(Result& result, std::vector<Batch> const& batches)
       result.trace_hash = fnv1a(&request.device.edge_count,
                                 sizeof(request.device.edge_count),
                                 result.trace_hash);
+      if (level != nullptr) {
+        ++level->logical_requests;
+        level->logical_bytes += static_cast<std::uint64_t>(request.device.edge_count) *
+                                sizeof(std::uint64_t);
+        ++size_histogram[request.device.edge_count];
+      }
     }
   }
+  if (level == nullptr || level->logical_requests == 0) { return; }
+  level->average_io_size =
+    static_cast<double>(level->logical_bytes) / level->logical_requests;
+  std::vector<std::pair<std::uint32_t, std::uint64_t>> sizes(size_histogram.begin(),
+                                                             size_histogram.end());
+  std::sort(sizes.begin(), sizes.end());
+  auto const lower = (level->logical_requests - 1) / 2;
+  auto const upper = level->logical_requests / 2;
+  std::uint64_t seen{};
+  std::uint64_t lower_size{}, upper_size{};
+  for (auto const& [edges, count] : sizes) {
+    seen += count;
+    if (lower_size == 0 && seen > lower) { lower_size = edges; }
+    if (seen > upper) {
+      upper_size = edges;
+      break;
+    }
+  }
+  level->p50_io_size =
+    (static_cast<double>(lower_size) + upper_size) * sizeof(std::uint64_t) / 2.0;
 }
 
 template <typename Launch>
 void execute_batches(std::vector<Batch> const& batches,
                      kvikio::FileHandle& file,
                      std::array<Slot*, 2> slots,
-                     Launch launch)
+                     Launch launch,
+                     double* io_seconds = nullptr)
 {
   if (batches.empty()) { return; }
-  slots[0]->submit(file, batches[0]);
+  auto submit = [&](Slot& slot, Batch const& batch) {
+    if (io_seconds == nullptr) {
+      slot.submit(file, batch);
+    } else {
+      auto const start = Clock::now();
+      slot.submit(file, batch);
+      *io_seconds += std::chrono::duration<double>(Clock::now() - start).count();
+    }
+  };
+  auto finish = [&](Slot& slot) {
+    if (io_seconds == nullptr) {
+      slot.finish_io();
+    } else {
+      auto const start = Clock::now();
+      slot.finish_io();
+      *io_seconds += std::chrono::duration<double>(Clock::now() - start).count();
+    }
+  };
+  submit(*slots[0], batches[0]);
   Slot* previous_compute{};
   for (std::size_t i = 0; i < batches.size(); ++i) {
     auto& current = *slots[i % slots.size()];
     if (i + 1 < batches.size()) {
       auto& next = *slots[(i + 1) % slots.size()];
       next.wait_reusable();
-      next.submit(file, batches[i + 1]);
+      submit(next, batches[i + 1]);
     }
-    current.finish_io();
+    finish(current);
     if (previous_compute != nullptr) { current.wait_for(*previous_compute); }
     launch(current);
     current.mark_active();
@@ -539,14 +611,15 @@ Result run_bfs(Options const& options,
   result.visited = 1;
   auto const algorithm_start = Clock::now();
   while (!frontier.empty() && result.iterations < options.max_iterations) {
+    auto const layer_start = Clock::now();
+    BFSLevelStats level;
+    level.layer             = result.iterations;
+    level.frontier_vertices = frontier.size();
+    level.policy_start      = policy_label(file, options);
     std::sort(frontier.begin(), frontier.end());
     auto const batches = make_batches(frontier, col, options);
-    update_trace_hash(result, batches);
-    result.processed_edges += std::accumulate(
-      batches.begin(), batches.end(), std::uint64_t{}, [](auto total, Batch const& batch) {
-        for (auto const& request : batch) { total += request.device.edge_count; }
-        return total;
-      });
+    update_trace_hash(result, batches, &level);
+    result.processed_edges += level.logical_bytes / sizeof(std::uint64_t);
     CUDA_CHECK(cudaMemset(next_count, 0, sizeof(std::uint32_t)));
     execute_batches(batches, file, slots, [&](Slot& slot) {
       bfs_expand<<<slot.request_count(), options.threads, 0, slot.stream()>>>(slot.edges(),
@@ -557,7 +630,7 @@ Result run_bfs(Options const& options,
                                                                              frontier_b,
                                                                              next_count);
       CUDA_CHECK(cudaGetLastError());
-    });
+    }, &level.io_seconds);
     std::uint32_t count{};
     CUDA_CHECK(cudaMemcpy(&count, next_count, sizeof(count), cudaMemcpyDeviceToHost));
     frontier.resize(count);
@@ -569,6 +642,14 @@ Result run_bfs(Options const& options,
     }
     result.visited += count;
     std::swap(frontier_a, frontier_b);
+    level.policy_end   = policy_label(file, options);
+    level.layer_seconds = std::chrono::duration<double>(Clock::now() - layer_start).count();
+    std::cerr << "BFS layer=" << level.layer << " requests=" << level.logical_requests
+              << " average_bytes=" << level.average_io_size << " p50_bytes=" << level.p50_io_size
+              << " io_seconds=" << level.io_seconds << " layer_seconds=" << level.layer_seconds
+              << " policy_start=" << level.policy_start << " policy_end=" << level.policy_end
+              << std::endl;
+    result.bfs_levels.push_back(std::move(level));
     result.iterations++;
   }
   result.algorithm_seconds = std::chrono::duration<double>(Clock::now() - algorithm_start).count();
@@ -726,6 +807,22 @@ void write_json(Options const& options,
       << "  \"logical_bytes\": " << logical_bytes << ",\n"
       << "  \"logical_trace_hash\": " << result.trace_hash << ",\n"
       << "  \"result_hash\": " << result.result_hash << ",\n"
+      << "  \"bfs_levels\": [\n";
+  for (std::size_t i = 0; i < result.bfs_levels.size(); ++i) {
+    auto const& level = result.bfs_levels[i];
+    out << "    {\"layer\": " << level.layer
+        << ", \"frontier_vertices\": " << level.frontier_vertices
+        << ", \"logical_requests\": " << level.logical_requests
+        << ", \"logical_bytes\": " << level.logical_bytes
+        << ", \"average_io_size\": " << level.average_io_size
+        << ", \"p50_io_size\": " << level.p50_io_size
+        << ", \"io_seconds\": " << level.io_seconds
+        << ", \"layer_seconds\": " << level.layer_seconds
+        << ", \"policy_start\": \"" << level.policy_start
+        << "\", \"policy_end\": \"" << level.policy_end << "\"}"
+        << (i + 1 == result.bfs_levels.size() ? "\n" : ",\n");
+  }
+  out << "  ],\n"
       << "  \"groute_enabled\": "
       << (kvikio::defaults::groute_enabled() ? "true" : "false") << ",\n"
       << "  \"dispatch\": \""
