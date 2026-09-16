@@ -149,6 +149,15 @@ class FileHandle {
   /** @brief Return the per-handle workload classification, policy, and profile. */
   [[nodiscard]] IOContextSnapshot io_context_snapshot() const noexcept;
 
+  /**
+   * @brief Override the profiled AUTO policy at an application phase boundary.
+   *
+   * All outstanding I/O and GPU work submitted through this handle must have completed before
+   * calling this method. Forced policies and handles without an IOContext reject the override.
+   * This experimental interface is used to validate phase-level routing.
+   */
+  [[nodiscard]] bool set_auto_policy_at_idle(IOPolicy policy) noexcept;
+
   /** @brief Return whether this handle was constructed with G-Route enabled. */
   [[nodiscard]] bool groute_enabled() const noexcept;
 

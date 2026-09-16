@@ -109,6 +109,34 @@ TEST(IOContextTest, policy_is_stable_after_profile)
   EXPECT_EQ(context.stats().request_count, kvikio::IOContext::profile_request_limit + 256);
 }
 
+TEST(IOContextTest, phase_override_requires_completed_auto_profile)
+{
+  kvikio::IOPolicy const host_direct{kvikio::IOPath::HOST_MEDIATED,
+                                     kvikio::CachePolicy::BYPASS,
+                                     kvikio::SubmitPolicy::DIRECT};
+  kvikio::IOContext context{true};
+  EXPECT_FALSE(context.set_auto_policy_at_idle(host_direct));
+  for (std::size_t i = 0; i < kvikio::IOContext::profile_request_limit; ++i) {
+    context.observe(64 * 1024, i * 64 * 1024);
+  }
+  EXPECT_EQ(context.policy().path, kvikio::IOPath::GPU_DIRECT);
+  EXPECT_TRUE(context.set_auto_policy_at_idle(host_direct));
+  EXPECT_EQ(context.policy().path, kvikio::IOPath::HOST_MEDIATED);
+  EXPECT_EQ(context.policy().cache, kvikio::CachePolicy::BYPASS);
+  for (std::size_t i = 0; i < 128; ++i) { context.observe(8, i * 8); }
+  EXPECT_EQ(context.policy().path, kvikio::IOPath::HOST_MEDIATED);
+
+  kvikio::IOContext forced{true,
+                           false,
+                           kvikio::ShapingConfig{},
+                           kvikio::PolicyMode::GDS_DIRECT};
+  for (std::size_t i = 0; i < kvikio::IOContext::profile_request_limit; ++i) {
+    forced.observe(64 * 1024, i * 64 * 1024);
+  }
+  EXPECT_FALSE(forced.set_auto_policy_at_idle(host_direct));
+  EXPECT_EQ(forced.policy().path, kvikio::IOPath::GPU_DIRECT);
+}
+
 TEST(IOContextTest, forced_policy_is_active_immediately_and_survives_profile)
 {
   using Case = std::tuple<kvikio::PolicyMode,

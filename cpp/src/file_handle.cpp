@@ -208,6 +208,11 @@ IOContextSnapshot FileHandle::io_context_snapshot() const noexcept
   return _io_context ? _io_context->snapshot() : IOContextSnapshot{};
 }
 
+bool FileHandle::set_auto_policy_at_idle(IOPolicy policy) noexcept
+{
+  return _io_context != nullptr && _io_context->set_auto_policy_at_idle(policy);
+}
+
 bool FileHandle::groute_enabled() const noexcept { return _io_context != nullptr; }
 
 RequestShaperStats FileHandle::request_shaper_stats() const noexcept

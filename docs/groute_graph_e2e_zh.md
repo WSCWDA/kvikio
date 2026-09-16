@@ -100,6 +100,7 @@ bash scripts/run_graph_e2e_matrix.sh
 更新并重新构建图执行器后，可先只运行三个关键策略；使用新的结果目录，不混入旧版 JSON：
 
 ```bash
+./build.sh libkvikio kvikio --pydevelop
 bash scripts/build_graph_e2e.sh
 GRAPH_PREFIX=/home/cwd/dataset/bafsdata/mtx_all/GAP-kron.bel \
 RESULT_ROOT=/mnt/gds/results/groute-kron-bfs-levels \
@@ -144,6 +145,41 @@ PY
 
 比较 Auto 第一层及后续各层的请求大小和策略即可确认早期采样是否代表主体工作量；
 比较同一层三个策略的 `layer_seconds` 才能判断路径选择带来的端到端影响。
+
+### 仅用于验证的阶段切换原型
+
+`auto_phase` 和 `auto` 使用相同的前 64 次请求画像。区别是 BFS 每层结束、两组 staging
+slot 的 futures 与 CUDA event 都完成之后，`auto_phase` 检查刚结束的这一层：若至少
+`PHASE_MIN_REQUESTS` 个有效邻接读取，且该层请求大小的 p50 小于 `PHASE_P50_BYTES`，
+就把**同一个** `FileHandle` 后续层的执行策略切成
+`HOST_MEDIATED/BYPASS/DIRECT`。默认门槛分别为 100,000 次与 16 KiB。
+它只切换一次，不影响其他策略或 PageRank。`switched_after_layer` 记录发生切换的层号，
+JSON 每层的 `policy_end` 表示下一层将使用的策略。
+
+先用相同的全量 BFS 数据、同一份执行器进行 3 次重复：
+
+```bash
+./build.sh libkvikio kvikio --pydevelop
+bash scripts/build_graph_e2e.sh
+GRAPH_PREFIX=/home/cwd/dataset/bafsdata/mtx_all/GAP-kron.bel \
+RESULT_ROOT=/mnt/gds/results/groute-kron-bfs-phase-r3 \
+ALGORITHMS=bfs \
+POLICIES="kvikio_threshold auto auto_phase host_direct" \
+REPEATS=3 BFS_SOURCE=1 BFS_MAX_LEVELS=100 \
+BATCH_REQUESTS=1024 KVIKIO_NTHREADS=4 \
+PHASE_MIN_REQUESTS=100000 PHASE_P50_BYTES=16384 \
+PAGE_CACHE_MODE=global PLOT=1 \
+bash scripts/run_graph_e2e_matrix.sh
+```
+
+检查 `failed_runs.txt` 为空且相同 repeat 中四个策略的 `logical_trace_hash`、
+`result_hash` 一致；汇总器会自动执行这些检查。查看 `summary.csv` 的时间中位数，
+以及 `e2e_bfs_auto_phase_r*.json` 中的 `switched_after_layer`、`bfs_levels`。
+完整 GAP-kron 预期第 3 层结束后切换；若实际换到其他层，应按 JSON 的 p50 和请求数解释。
+图中的 `auto_phase` 明确标为实验性的阶段策略，不代表 G-Route 当前默认 Auto 行为。
+
+该原型的门槛来自上述单条 BFS trace，意在验证安全切换能否追回第 4、5 层的时间。
+在其他源点、GAP-urand 和不同缓存状态下验证之前，不能作为最终的通用在线算法。
 
 脚本生成：
 

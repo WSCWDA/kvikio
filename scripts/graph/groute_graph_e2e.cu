@@ -20,6 +20,7 @@
 #include <iostream>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -56,6 +57,9 @@ struct Options {
   float tolerance{0.001F};
   std::uint32_t repeat_id{0};
   std::uint32_t execution_order{0};
+  bool phase_switch{false};
+  std::uint64_t phase_min_requests{100000};
+  std::uint64_t phase_p50_bytes{16 * 1024};
 };
 
 std::uint64_t parse_u64(char const* value, char const* name)
@@ -107,6 +111,15 @@ Options parse_options(int argc, char** argv)
     } else if (argument == "--execution-order") {
       options.execution_order =
         parse_u64(need_value("--execution-order"), "--execution-order");
+    } else if (argument == "--phase-switch") {
+      auto const enabled = parse_u64(need_value("--phase-switch"), "--phase-switch");
+      if (enabled > 1) { throw std::invalid_argument("--phase-switch must be 0 or 1"); }
+      options.phase_switch = enabled == 1;
+    } else if (argument == "--phase-min-requests") {
+      options.phase_min_requests =
+        parse_u64(need_value("--phase-min-requests"), "--phase-min-requests");
+    } else if (argument == "--phase-p50-bytes") {
+      options.phase_p50_bytes = parse_u64(need_value("--phase-p50-bytes"), "--phase-p50-bytes");
     } else {
       throw std::invalid_argument("unknown option: " + std::string{argument});
     }
@@ -129,6 +142,15 @@ Options parse_options(int argc, char** argv)
   }
   if (!(options.alpha > 0.0F && options.alpha < 1.0F) || options.tolerance <= 0.0F) {
     throw std::invalid_argument("invalid PageRank alpha or tolerance");
+  }
+  if (options.phase_switch && (options.algorithm != "bfs" || options.policy != "auto_phase")) {
+    throw std::invalid_argument("phase switching requires BFS with --policy auto_phase");
+  }
+  if (options.policy == "auto_phase" && !options.phase_switch) {
+    throw std::invalid_argument("--policy auto_phase requires --phase-switch 1");
+  }
+  if (options.phase_min_requests == 0 || options.phase_p50_bytes == 0) {
+    throw std::invalid_argument("phase switching thresholds must be positive");
   }
   return options;
 }
@@ -473,6 +495,7 @@ struct BFSLevelStats {
   double layer_seconds{};  // Includes planning, I/O, and GPU execution.
   std::string policy_start;
   std::string policy_end;
+  bool switched_after_layer{};
 };
 
 struct Result {
@@ -485,6 +508,7 @@ struct Result {
   std::uint64_t trace_hash{1469598103934665603ULL};
   std::uint64_t result_hash{};
   std::vector<BFSLevelStats> bfs_levels;
+  std::optional<std::uint32_t> switched_after_layer;
 };
 
 void update_trace_hash(Result& result,
@@ -642,12 +666,32 @@ Result run_bfs(Options const& options,
     }
     result.visited += count;
     std::swap(frontier_a, frontier_b);
+    // execute_batches() drains both slots, including their GPU completion events. The frontier
+    // copy above has also completed, so no in-flight request can observe a partially changed
+    // policy. Switch once, at the phase boundary, without changing the logical request trace.
+    if (options.phase_switch && !result.switched_after_layer &&
+        level.logical_requests >= options.phase_min_requests &&
+        level.p50_io_size < static_cast<double>(options.phase_p50_bytes)) {
+      kvikio::IOPolicy const host_direct{kvikio::IOPath::HOST_MEDIATED,
+                                         kvikio::CachePolicy::BYPASS,
+                                         kvikio::SubmitPolicy::DIRECT};
+      auto const current = file.io_context_snapshot().policy;
+      if (current.path != host_direct.path || current.cache != host_direct.cache ||
+          current.submit != host_direct.submit) {
+        if (!file.set_auto_policy_at_idle(host_direct)) {
+          throw std::runtime_error("phase policy override rejected by IOContext");
+        }
+        result.switched_after_layer = level.layer;
+        level.switched_after_layer  = true;
+      }
+    }
     level.policy_end   = policy_label(file, options);
     level.layer_seconds = std::chrono::duration<double>(Clock::now() - layer_start).count();
     std::cerr << "BFS layer=" << level.layer << " requests=" << level.logical_requests
               << " average_bytes=" << level.average_io_size << " p50_bytes=" << level.p50_io_size
               << " io_seconds=" << level.io_seconds << " layer_seconds=" << level.layer_seconds
               << " policy_start=" << level.policy_start << " policy_end=" << level.policy_end
+              << " switched_after_layer=" << level.switched_after_layer
               << std::endl;
     result.bfs_levels.push_back(std::move(level));
     result.iterations++;
@@ -807,6 +851,16 @@ void write_json(Options const& options,
       << "  \"logical_bytes\": " << logical_bytes << ",\n"
       << "  \"logical_trace_hash\": " << result.trace_hash << ",\n"
       << "  \"result_hash\": " << result.result_hash << ",\n"
+      << "  \"phase_switch_enabled\": " << (options.phase_switch ? "true" : "false") << ",\n"
+      << "  \"phase_min_requests\": " << options.phase_min_requests << ",\n"
+      << "  \"phase_p50_bytes\": " << options.phase_p50_bytes << ",\n"
+      << "  \"switched_after_layer\": ";
+  if (result.switched_after_layer) {
+    out << *result.switched_after_layer;
+  } else {
+    out << "null";
+  }
+  out << ",\n"
       << "  \"bfs_levels\": [\n";
   for (std::size_t i = 0; i < result.bfs_levels.size(); ++i) {
     auto const& level = result.bfs_levels[i];
@@ -819,7 +873,9 @@ void write_json(Options const& options,
         << ", \"io_seconds\": " << level.io_seconds
         << ", \"layer_seconds\": " << level.layer_seconds
         << ", \"policy_start\": \"" << level.policy_start
-        << "\", \"policy_end\": \"" << level.policy_end << "\"}"
+        << "\", \"policy_end\": \"" << level.policy_end
+        << "\", \"switched_after_layer\": "
+        << (level.switched_after_layer ? "true" : "false") << "}"
         << (i + 1 == result.bfs_levels.size() ? "\n" : ",\n");
   }
   out << "  ],\n"

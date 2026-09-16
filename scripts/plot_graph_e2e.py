@@ -13,6 +13,7 @@ from pathlib import Path
 POLICIES = [
     "kvikio_threshold",
     "auto",
+    "auto_phase",
     "host_direct",
     "host_cache",
     "gds_direct",
@@ -21,6 +22,7 @@ POLICIES = [
 LABELS = {
     "kvikio_threshold": "KvikIO\nthreshold",
     "auto": "G-Route\nAuto",
+    "auto_phase": "Auto +\nphase",
     "host_direct": "Host\ndirect",
     "host_cache": "Host\ncache",
     "gds_direct": "GDS\ndirect",
@@ -29,6 +31,7 @@ LABELS = {
 COLORS = {
     "kvikio_threshold": "#9A9A9A",
     "auto": "#2878B5",
+    "auto_phase": "#6B5CA5",
     "host_direct": "#9AC9DB",
     "host_cache": "#55A868",
     "gds_direct": "#E5A84B",

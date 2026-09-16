@@ -146,7 +146,7 @@ def summarize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     }
     best_forced: dict[str, float] = {}
     for row in result:
-        if row["policy_mode"] in {"auto", "kvikio_threshold"}:
+        if row["policy_mode"] in {"auto", "auto_phase", "kvikio_threshold"}:
             continue
         algorithm = str(row["algorithm"])
         value = float(row["algorithm_seconds_median"])

@@ -206,6 +206,17 @@ bool IOContext::profile_complete() const noexcept
 
 PolicyMode IOContext::policy_mode() const noexcept { return _policy_mode; }
 
+bool IOContext::set_auto_policy_at_idle(IOPolicy policy) noexcept
+{
+  if (_policy_mode != PolicyMode::AUTO || !profile_complete()) { return false; }
+  // Callers must have drained all requests. read_impl() can otherwise observe a policy change
+  // after a request has been queued in the thread pool.
+  _path.store(policy.path, std::memory_order_relaxed);
+  _cache.store(policy.cache, std::memory_order_relaxed);
+  _submit.store(policy.submit, std::memory_order_relaxed);
+  return true;
+}
+
 void IOContext::apply_forced_policy() noexcept
 {
   switch (_policy_mode) {

@@ -113,6 +113,8 @@ class IOContext {
   [[nodiscard]] IOContextSnapshot snapshot() const noexcept;
   [[nodiscard]] bool profile_complete() const noexcept;
   [[nodiscard]] PolicyMode policy_mode() const noexcept;
+  /** @brief Override a profiled AUTO policy between phases, after all I/O has completed. */
+  [[nodiscard]] bool set_auto_policy_at_idle(IOPolicy policy) noexcept;
   void reset() noexcept;
 
  private:

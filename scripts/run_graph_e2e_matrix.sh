@@ -25,6 +25,8 @@ KVIKIO_NTHREADS="${KVIKIO_NTHREADS:-4}"
 KVIKIO_THRESHOLD_BYTES="${KVIKIO_THRESHOLD_BYTES:-16384}"
 PAGE_CACHE_MODE="${PAGE_CACHE_MODE:-file}"
 HOST_CACHE_BYTES="${HOST_CACHE_BYTES:-1073741824}"
+PHASE_MIN_REQUESTS="${PHASE_MIN_REQUESTS:-100000}"
+PHASE_P50_BYTES="${PHASE_P50_BYTES:-16384}"
 
 for path in "${GRAPH_E2E_BIN}" "${GRAPH_PREFIX}.col" "${GRAPH_PREFIX}.dst"; do
   [[ -e "${path}" ]] || { echo "Missing required path: ${path}" >&2; exit 2; }
@@ -32,7 +34,8 @@ done
 [[ -x "${GRAPH_E2E_BIN}" ]] || { echo "Not executable: ${GRAPH_E2E_BIN}" >&2; exit 2; }
 for integer in "${REPEATS}" "${BFS_MAX_LEVELS}" "${PAGERANK_ITERATIONS}" \
                "${STAGING_BYTES}" "${BATCH_REQUESTS}" "${MAX_SEGMENT_BYTES}" \
-               "${CUDA_THREADS}" "${KVIKIO_NTHREADS}"; do
+               "${CUDA_THREADS}" "${KVIKIO_NTHREADS}" \
+               "${PHASE_MIN_REQUESTS}" "${PHASE_P50_BYTES}"; do
   [[ "${integer}" =~ ^[1-9][0-9]*$ ]] || { echo "Positive integer expected: ${integer}" >&2; exit 2; }
 done
 [[ "${PAGE_CACHE_MODE}" =~ ^(none|file|global)$ ]] || {
@@ -45,7 +48,7 @@ fi
 
 read -r -a algorithm_array <<<"${ALGORITHMS}"
 read -r -a policy_array <<<"${POLICIES}"
-valid_policies=" kvikio_threshold auto host_direct host_cache gds_direct gds_shaped "
+valid_policies=" kvikio_threshold auto auto_phase host_direct host_cache gds_direct gds_shaped "
 for policy in "${policy_array[@]}"; do
   [[ "${valid_policies}" == *" ${policy} "* ]] || { echo "Unsupported policy: ${policy}" >&2; exit 2; }
 done
@@ -53,6 +56,12 @@ for algorithm in "${algorithm_array[@]}"; do
   [[ "${algorithm}" == "bfs" || "${algorithm}" == "pagerank" ]] || {
     echo "Unsupported algorithm: ${algorithm}" >&2; exit 2;
   }
+  for policy in "${policy_array[@]}"; do
+    if [[ "${algorithm}" != "bfs" && "${policy}" == "auto_phase" ]]; then
+      echo "auto_phase is supported only for BFS; set ALGORITHMS=bfs" >&2
+      exit 2
+    fi
+  done
 done
 
 mkdir -p "${RESULT_ROOT}"
@@ -89,9 +98,16 @@ run_one() {
     threshold="${KVIKIO_THRESHOLD_BYTES}"
     effective=auto
   fi
+  local phase_switch=0
+  if [[ "${policy}" == "auto_phase" ]]; then
+    effective=auto
+    phase_switch=1
+  fi
   local host_cache=0 shaping=0
-  [[ "${policy}" == "auto" || "${policy}" == "host_cache" ]] && host_cache=1
-  [[ "${policy}" == "auto" || "${policy}" == "gds_shaped" ]] && shaping=1
+  [[ "${policy}" == "auto" || "${policy}" == "auto_phase" ||
+     "${policy}" == "host_cache" ]] && host_cache=1
+  [[ "${policy}" == "auto" || "${policy}" == "auto_phase" ||
+     "${policy}" == "gds_shaped" ]] && shaping=1
   local iterations="${BFS_MAX_LEVELS}"
   [[ "${algorithm}" == "pagerank" ]] && iterations="${PAGERANK_ITERATIONS}"
 
@@ -113,6 +129,8 @@ run_one() {
         --output "${temporary}" --source "${BFS_SOURCE}" --max-iterations "${iterations}" \
         --staging-bytes "${STAGING_BYTES}" --batch-requests "${BATCH_REQUESTS}" \
         --max-segment-bytes "${MAX_SEGMENT_BYTES}" --threads "${CUDA_THREADS}" \
+        --phase-switch "${phase_switch}" --phase-min-requests "${PHASE_MIN_REQUESTS}" \
+        --phase-p50-bytes "${PHASE_P50_BYTES}" \
         --gpu "${GPU}" --repeat-id "${repeat}" --execution-order "${order}" \
         >"${log}" 2>&1; then
     mv "${temporary}" "${output}"

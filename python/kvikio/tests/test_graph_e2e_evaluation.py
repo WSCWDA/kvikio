@@ -85,6 +85,22 @@ def test_graph_e2e_summary_rejects_different_bfs_result(tmp_path):
         raise AssertionError("mismatched BFS result was accepted")
 
 
+def test_phase_auto_is_not_counted_as_a_forced_policy(tmp_path):
+    module = _load_script("summarize_graph_e2e.py")
+    for policy in ("kvikio_threshold", "auto", "auto_phase", "gds_direct"):
+        row = _result(policy)
+        if policy == "auto_phase":
+            row["algorithm_seconds"] = 0.25
+        (tmp_path / f"e2e_bfs_{policy}_r1.json").write_text(
+            json.dumps(row), encoding="utf-8"
+        )
+    summary = module.summarize(module.load_rows(tmp_path))
+    auto = next(row for row in summary if row["policy_mode"] == "auto")
+    assert auto["fraction_of_best_forced"] == 1.0
+    phase = next(row for row in summary if row["policy_mode"] == "auto_phase")
+    assert phase["speedup_vs_kvikio_threshold"] == 8.0
+
+
 def test_graph_executor_uses_long_lived_handle_and_double_buffer():
     source = (ROOT / "scripts" / "graph" / "groute_graph_e2e.cu").read_text(
         encoding="utf-8"
