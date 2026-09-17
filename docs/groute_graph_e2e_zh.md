@@ -201,6 +201,67 @@ bash scripts/run_graph_e2e_matrix.sh
 该原型的门槛来自上述单条 BFS trace，意在验证安全切换能否追回第 4、5 层的时间。
 在其他源点、GAP-urand 和不同缓存状态下验证之前，不能作为最终的通用在线算法。
 
+### 新版批量缓存：完整图 BFS 对照
+
+使用完整 GAP-kron 的 `.col/.dst`（不要用 s20），保持图、源点、执行器及预热/清缓存
+方式一致。性能运行不打开缓存分段计时，使用全新结果目录；每组运行前脚本会按
+`PAGE_CACHE_MODE=global` 清除 Linux page cache（需要 root）。
+
+```bash
+./build.sh libkvikio kvikio --pydevelop
+bash scripts/build_graph_e2e.sh
+GRAPH_PREFIX=/home/cwd/dataset/bafsdata/mtx_all/GAP-kron.bel \
+RESULT_ROOT=/mnt/gds/results/groute-kron-bfs-batch-full \
+ALGORITHMS=bfs \
+POLICIES="kvikio_threshold auto auto_phase host_direct host_cache" \
+REPEATS=3 BFS_SOURCE=1 BFS_MAX_LEVELS=100 \
+BATCH_REQUESTS=1024 STAGING_BYTES=268435456 \
+KVIKIO_NTHREADS=4 HOST_CACHE_BYTES=1073741824 \
+KVIKIO_HOST_CACHE_PROFILE=0 PAGE_CACHE_MODE=global PLOT=0 \
+bash scripts/run_graph_e2e_matrix.sh
+```
+
+检查 `failed_runs.txt` 为空；脚本汇总时要求同一次 repeat 的 BFS
+`logical_trace_hash`、`logical_requests` 和 `result_hash` 一致。分别比较 `summary.csv`
+的 `algorithm_seconds_median`，以及 JSON `bfs_levels` 中第 4/5 层的
+`layer_seconds`。重点检查 `host_cache` 的 `cache.hits`、`cache.batch_calls`、
+`cache.batch_cache_reads`、`cache.copy_completions`，确认缓存命中确实使用批量路径。
+报告 `host_cache` 对 `host_direct` 的性能和分层差值；若仍较慢，单独重复一次
+`KVIKIO_HOST_CACHE_PROFILE=1` 的诊断运行，查看 `cache.lookup_wait_ns`、
+`cache.lookup_ns`、`cache.copy_submit_ns`、`cache.completion_wait_ns` 和
+`cache.storage_read_ns`。这些是各请求累计计时，可能与线程并发重叠，不能直接
+相加为端到端耗时。`host_direct` 指绕过 G-Route Host Cache，不等于强制 POSIX
+`O_DIRECT`。完成 GAP-kron 后换成 `GAP-urand.bel` 并使用新目录复现。
+
+### PageRank：逐顶点数值正确性
+
+旧版汇总器比较 rank sum 和粗量化的 result hash；这无法发现少数顶点的数值差异。
+新版执行器的可选 `--rank-output` 把最终 float32 rank 向量写到 `.ranks.f32`，
+矩阵脚本在相同 repeat 的逻辑 trace、顶点数和迭代轮数一致后，与 `host_direct`
+逐顶点比较。先使用 s20 做完整迭代验证：
+
+```bash
+GRAPH_PREFIX=/home/cwd/dataset/bafsdata/bel/GAP-kron-s20.bel \
+RESULT_ROOT=/mnt/gds/results/groute-kron-s20-pagerank-ranks \
+ALGORITHMS=pagerank \
+POLICIES="host_direct host_cache auto kvikio_threshold" \
+REPEATS=1 PAGERANK_ITERATIONS=10 BATCH_REQUESTS=1024 \
+VERIFY_PAGERANK_RANKS=1 RANK_REFERENCE_POLICY=host_direct \
+PAGE_CACHE_MODE=global PLOT=0 \
+bash scripts/run_graph_e2e_matrix.sh
+cat /mnt/gds/results/groute-kron-s20-pagerank-ranks/pagerank_rank_comparison.csv
+```
+
+判定为每个顶点 `|rank - reference| <= atol + rtol * |reference|`；默认
+`atol=1e-3/vertex_count`、`rtol=1e-3`，在 CSV 中输出实际阈值、最大绝对误差、
+相对 L1 误差和超限顶点数。出现超限或缺少向量文件时脚本退出非零；应检查数值
+差异与 trace，不要靠增大容差掩盖错误。完整 GAP-kron 可在小图通过后沿用
+`GRAPH_PREFIX=/home/cwd/dataset/bafsdata/mtx_all/GAP-kron.bel`，先设
+`PAGERANK_ITERATIONS=1` 验证资源消耗，再用 10 轮与完整图性能实验的设置一致。
+完整图每个策略/重复的 rank 向量约 512 MiB；预留结果目录空间。
+逐顶点检查单独运行：向量写盘不计入程序报告的计时，但会影响随后实验的
+SSD/page cache 状态；性能矩阵应在另一个新目录用 `VERIFY_PAGERANK_RANKS=0` 重跑。
+
 脚本生成：
 
 - `raw_results.csv`：每次运行的原始数据；
@@ -208,7 +269,7 @@ bash scripts/run_graph_e2e_matrix.sh
 - `graph_e2e.pdf` 和 `graph_e2e.png`：BFS/PageRank 对比图；
 - `failed_runs.txt`：失败运行（全通过时为空或不存在）。
 
-汇总器会验证同一算法、同一次重复下各策略具有相同的逻辑 trace hash、请求数和处理边数。BFS 还要求 visited bitmap hash 完全一致；PageRank 要求 `rank_sum` 在 `1e-5` 相对误差内一致。验证失败时不会产生可用于论文的结果。
+汇总器会验证同一算法、同一次重复下各策略具有相同的逻辑 trace hash、请求数和处理边数。BFS 还要求 visited bitmap hash 完全一致；PageRank 汇总器要求 `rank_sum` 在 `1e-5` 相对误差内一致。逐顶点 rank 检查需要另外打开 `VERIFY_PAGERANK_RANKS=1`；不能只凭 rank sum 宣称逐顶点正确。
 
 ## 5. BaM 外部参考
 

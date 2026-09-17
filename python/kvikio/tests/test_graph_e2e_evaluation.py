@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import struct
 from pathlib import Path
 
 
@@ -138,3 +139,61 @@ def test_graph_e2e_summary_preserves_cache_timing_and_legacy_results(tmp_path):
     assert rows[0]["cache_batch_reads"] == 128 or rows[1]["cache_batch_reads"] == 128
     assert sorted(row["cache_lookup_ns"] for row in rows) == [0, 200]
     assert sorted(row["cache_completion_wait_ns"] for row in rows) == [0, 500]
+
+
+def test_pagerank_vector_comparison_checks_every_vertex(tmp_path):
+    module = _load_script("compare_pagerank_ranks.py")
+    for policy, ranks in (
+        ("host_direct", (0.25, 0.5, 0.75, 1.0)),
+        ("host_cache", (0.25, 0.5, 0.75, 1.00001)),
+    ):
+        row = _result(policy, algorithm="pagerank")
+        row["vertex_count"] = 4
+        (tmp_path / f"e2e_pagerank_{policy}_r1.json").write_text(json.dumps(row))
+        (tmp_path / f"e2e_pagerank_{policy}_r1.ranks.f32").write_bytes(
+            struct.pack("<4f", *ranks)
+        )
+    comparisons = module.compare_results(tmp_path, "host_direct", 1e-5, 1e-4)
+    assert len(comparisons) == 1
+    assert comparisons[0]["passed"]
+    scaled = module.compare_results(tmp_path, "host_direct", "auto", 1e-3)
+    assert scaled[0]["atol"] == 1e-3 / 4
+    assert scaled[0]["passed"]
+    (tmp_path / "e2e_pagerank_host_cache_r1.ranks.f32").write_bytes(
+        struct.pack("<4f", 0.25, 0.5, 0.75, 1.5)
+    )
+    comparisons = module.compare_results(tmp_path, "host_direct", 1e-5, 1e-4)
+    assert comparisons[0]["out_of_tolerance_vertices"] == 1
+    assert not comparisons[0]["passed"]
+
+
+def test_pagerank_vector_comparison_rejects_missing_or_wrong_trace(tmp_path):
+    module = _load_script("compare_pagerank_ranks.py")
+    for policy in ("host_direct", "host_cache"):
+        row = _result(policy, algorithm="pagerank")
+        row["vertex_count"] = 1
+        (tmp_path / f"e2e_pagerank_{policy}_r1.json").write_text(json.dumps(row))
+        (tmp_path / f"e2e_pagerank_{policy}_r1.ranks.f32").write_bytes(
+            struct.pack("<f", 0.25)
+        )
+    (tmp_path / "e2e_pagerank_host_cache_r1.ranks.f32").unlink()
+    try:
+        module.compare_results(tmp_path, "host_direct", 1e-5, 1e-4)
+    except ValueError as error:
+        assert "missing rank vector" in str(error)
+    else:
+        raise AssertionError("missing PageRank data was accepted")
+
+    (tmp_path / "e2e_pagerank_host_cache_r1.ranks.f32").write_bytes(
+        struct.pack("<f", 0.25)
+    )
+    path = tmp_path / "e2e_pagerank_host_cache_r1.json"
+    row = json.loads(path.read_text())
+    row["logical_trace_hash"] = 999
+    path.write_text(json.dumps(row))
+    try:
+        module.compare_results(tmp_path, "host_direct", 1e-5, 1e-4)
+    except ValueError as error:
+        assert "logical_trace_hash" in str(error)
+    else:
+        raise AssertionError("mismatched PageRank trace was accepted")

@@ -46,6 +46,7 @@ struct Options {
   std::string graph;
   std::string policy{"auto"};
   std::string output;
+  std::string rank_output;
   std::uint32_t source{1};
   std::uint32_t max_iterations{100};
   std::size_t staging_bytes{256ULL << 20};
@@ -87,6 +88,8 @@ Options parse_options(int argc, char** argv)
       options.policy = need_value("--policy");
     } else if (argument == "--output") {
       options.output = need_value("--output");
+    } else if (argument == "--rank-output") {
+      options.rank_output = need_value("--rank-output");
     } else if (argument == "--source") {
       options.source = parse_u64(need_value("--source"), "--source");
     } else if (argument == "--max-iterations") {
@@ -129,6 +132,12 @@ Options parse_options(int argc, char** argv)
   }
   if (options.graph.empty()) { throw std::invalid_argument("--graph is required"); }
   if (options.output.empty()) { throw std::invalid_argument("--output is required"); }
+  if (!options.rank_output.empty() && options.algorithm != "pagerank") {
+    throw std::invalid_argument("--rank-output requires --algorithm pagerank");
+  }
+  if (!options.rank_output.empty() && options.rank_output == options.output) {
+    throw std::invalid_argument("--rank-output must differ from --output");
+  }
   if (options.max_iterations == 0 || options.staging_bytes == 0 ||
       options.batch_requests == 0 || options.max_segment_bytes == 0 || options.threads == 0) {
     throw std::invalid_argument("numeric controls must be positive");
@@ -811,6 +820,14 @@ Result run_pagerank(Options const& options,
   logical_requests = slot0.logical_requests() + slot1.logical_requests();
   logical_bytes = slot0.logical_bytes() + slot1.logical_bytes();
   result.job_seconds = std::chrono::duration<double>(Clock::now() - job_start).count();
+  // Writing the optional validation artifact is excluded from both reported timers.
+  if (!options.rank_output.empty()) {
+    std::ofstream out(options.rank_output, std::ios::binary);
+    if (!out) { throw std::runtime_error("cannot create " + options.rank_output); }
+    out.write(reinterpret_cast<char const*>(host_rank.data()),
+              static_cast<std::streamsize>(host_rank.size() * sizeof(float)));
+    if (!out) { throw std::runtime_error("cannot write " + options.rank_output); }
+  }
   cudaFree(next_count);
   cudaFree(next_active);
   cudaFree(residual);

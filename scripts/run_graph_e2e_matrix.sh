@@ -27,6 +27,13 @@ PAGE_CACHE_MODE="${PAGE_CACHE_MODE:-file}"
 HOST_CACHE_BYTES="${HOST_CACHE_BYTES:-1073741824}"
 PHASE_MIN_REQUESTS="${PHASE_MIN_REQUESTS:-100000}"
 PHASE_P50_BYTES="${PHASE_P50_BYTES:-16384}"
+VERIFY_PAGERANK_RANKS="${VERIFY_PAGERANK_RANKS:-0}"
+RANK_REFERENCE_POLICY="${RANK_REFERENCE_POLICY:-host_direct}"
+RANK_ATOL="${RANK_ATOL:-auto}"
+RANK_RTOL="${RANK_RTOL:-1e-3}"
+[[ "${VERIFY_PAGERANK_RANKS}" == "0" || "${VERIFY_PAGERANK_RANKS}" == "1" ]] || {
+  echo "VERIFY_PAGERANK_RANKS must be 0 or 1" >&2; exit 2;
+}
 
 for path in "${GRAPH_E2E_BIN}" "${GRAPH_PREFIX}.col" "${GRAPH_PREFIX}.dst"; do
   [[ -e "${path}" ]] || { echo "Missing required path: ${path}" >&2; exit 2; }
@@ -48,6 +55,10 @@ fi
 
 read -r -a algorithm_array <<<"${ALGORITHMS}"
 read -r -a policy_array <<<"${POLICIES}"
+if [[ "${VERIFY_PAGERANK_RANKS}" == "1" && " ${ALGORITHMS} " == *" pagerank "* &&
+      " ${POLICIES} " != *" ${RANK_REFERENCE_POLICY} "* ]]; then
+  echo "RANK_REFERENCE_POLICY must be included in POLICIES" >&2; exit 2
+fi
 valid_policies=" kvikio_threshold auto auto_phase host_direct host_cache gds_direct gds_shaped "
 for policy in "${policy_array[@]}"; do
   [[ "${valid_policies}" == *" ${policy} "* ]] || { echo "Unsupported policy: ${policy}" >&2; exit 2; }
@@ -92,6 +103,12 @@ run_one() {
   local output="${RESULT_ROOT}/${name}.json"
   local temporary="${output}.tmp"
   local log="${RESULT_ROOT}/${name}.log"
+  local rank_output="${RESULT_ROOT}/${name}.ranks.f32"
+  local rank_args=()
+  if [[ "${algorithm}" == "pagerank" && "${VERIFY_PAGERANK_RANKS}" == "1" ]]; then
+    rank_args=(--rank-output "${rank_output}")
+    rm -f "${rank_output}"
+  fi
   local groute=1 threshold=0 effective="${policy}"
   if [[ "${policy}" == "kvikio_threshold" ]]; then
     groute=0
@@ -132,12 +149,14 @@ run_one() {
         --phase-switch "${phase_switch}" --phase-min-requests "${PHASE_MIN_REQUESTS}" \
         --phase-p50-bytes "${PHASE_P50_BYTES}" \
         --gpu "${GPU}" --repeat-id "${repeat}" --execution-order "${order}" \
+        "${rank_args[@]}" \
         >"${log}" 2>&1; then
     mv "${temporary}" "${output}"
     echo "PASS: ${output}"
   else
     local rc=$?
     rm -f "${temporary}"
+    if [[ "${VERIFY_PAGERANK_RANKS}" == "1" ]]; then rm -f "${rank_output}"; fi
     echo "${name},exit=${rc},log=${log}" | tee -a "${RESULT_ROOT}/failed_runs.txt"
     status=1
   fi
@@ -155,6 +174,11 @@ done
 
 "${PYTHON_BIN}" "${REPO_ROOT}/scripts/summarize_graph_e2e.py" \
   --result-root "${RESULT_ROOT}" || status=1
+if [[ "${VERIFY_PAGERANK_RANKS}" == "1" && " ${ALGORITHMS} " == *" pagerank "* ]]; then
+  "${PYTHON_BIN}" "${REPO_ROOT}/scripts/compare_pagerank_ranks.py" \
+    --result-root "${RESULT_ROOT}" --reference-policy "${RANK_REFERENCE_POLICY}" \
+    --atol "${RANK_ATOL}" --rtol "${RANK_RTOL}" || status=1
+fi
 if [[ "${PLOT:-1}" == "1" ]]; then
   "${PYTHON_BIN}" "${REPO_ROOT}/scripts/plot_graph_e2e.py" \
     --summary "${RESULT_ROOT}/summary.csv" --output-prefix "${RESULT_ROOT}/graph_e2e" || status=1
