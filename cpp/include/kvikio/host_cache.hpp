@@ -8,8 +8,10 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <vector>
 
 #include <kvikio/error.hpp>
+#include <kvikio/shim/cuda.hpp>
 
 namespace kvikio {
 
@@ -26,9 +28,25 @@ struct HostCacheStats {
   std::uint64_t metadata_evictions{};
   std::uint64_t tracked_regions{};
   std::uint64_t cache_entries{};
+  // Timings are accumulated only with KVIKIO_HOST_CACHE_PROFILE=1.
+  std::uint64_t lookup_wait_ns{};
+  std::uint64_t lookup_ns{};
+  std::uint64_t storage_read_ns{};
+  std::uint64_t copy_submit_ns{};
+  std::uint64_t completion_wait_ns{};
+  std::uint64_t copy_completions{};
+  std::uint64_t batch_calls{};
+  std::uint64_t batch_cache_reads{};
+  std::uint64_t pinned_bypasses{};
 };
 
 namespace detail {
+
+struct HostCacheReadRequest {
+  void* device_ptr{};
+  std::size_t size{};
+  std::size_t file_offset{};
+};
 
 /** @brief Snapshot of the bounded region-admission metadata. */
 struct RegionAdmissionStats {
@@ -99,6 +117,18 @@ class HostCache {
                                   std::size_t size,
                                   std::size_t file_offset,
                                   std::size_t dev_ptr_offset);
+
+  /**
+   * @brief Copy eligible cached reads to GPU on one stream and synchronize once per batch.
+   *
+   * An empty optional means that the caller must execute the normal file read. The cache pins
+   * every source line until all enqueued GPU copies have completed, including on exceptions.
+   */
+  std::vector<std::optional<std::size_t>> read_batch(
+    int fd_direct_off,
+    int fd_direct_on,
+    std::vector<HostCacheReadRequest> const& requests,
+    CUstream stream);
 
   void clear() noexcept;
   [[nodiscard]] HostCacheStats stats() const noexcept;

@@ -96,6 +96,15 @@ cdef extern from "<kvikio/file_handle.hpp>" namespace "kvikio" nogil:
         uint64_t metadata_evictions
         uint64_t tracked_regions
         uint64_t cache_entries
+        uint64_t lookup_wait_ns
+        uint64_t lookup_ns
+        uint64_t storage_read_ns
+        uint64_t copy_submit_ns
+        uint64_t completion_wait_ns
+        uint64_t copy_completions
+        uint64_t batch_calls
+        uint64_t batch_cache_reads
+        uint64_t pinned_bypasses
 
     cdef cppclass RequestShaperStats:
         uint64_t logical_requests
@@ -224,6 +233,15 @@ cdef class CuFile:
             "metadata_evictions": result.metadata_evictions,
             "tracked_regions": result.tracked_regions,
             "cache_entries": result.cache_entries,
+            "lookup_wait_ns": result.lookup_wait_ns,
+            "lookup_ns": result.lookup_ns,
+            "storage_read_ns": result.storage_read_ns,
+            "copy_submit_ns": result.copy_submit_ns,
+            "completion_wait_ns": result.completion_wait_ns,
+            "copy_completions": result.copy_completions,
+            "batch_calls": result.batch_calls,
+            "batch_cache_reads": result.batch_cache_reads,
+            "pinned_bypasses": result.pinned_bypasses,
         }
 
     def io_context(self) -> dict:

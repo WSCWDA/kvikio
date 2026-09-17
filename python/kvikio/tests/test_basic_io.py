@@ -333,6 +333,36 @@ def test_forced_host_cache_is_active_on_first_request(tmp_path):
     assert stats["hits"] == 1
 
 
+def test_host_cache_hit_timing_and_gpu_data(tmp_path, monkeypatch):
+    """A cache hit copies the correct bytes and publishes segmented timings."""
+    monkeypatch.setenv("KVIKIO_HOST_CACHE_PROFILE", "1")
+    filename = tmp_path / "host-cache-timing"
+    expected = numpy.arange(64 * 1024, dtype=numpy.uint8)
+    expected.tofile(filename)
+    destination = cupy.empty(4096, dtype=cupy.uint8)
+    settings = {
+        "policy_mode": kvikio.PolicyMode.HOST_CACHE,
+        "host_cache_capacity": 4 * 64 * 1024,
+        "host_cache_line_size": 64 * 1024,
+        "host_cache_max_io_size": 4096,
+        "host_cache_region_size": 4 * 64 * 1024,
+        "host_cache_admission_threshold": 2,
+        "host_cache_max_regions": 128,
+    }
+    with kvikio.defaults.set(settings):
+        with kvikio.CuFile(filename, "r") as f:
+            for _ in range(3):
+                assert f.pread(destination, size=4096, task_size=4096).get() == 4096
+            stats = f.host_cache_stats()
+    cupy.testing.assert_array_equal(destination, expected[:4096])
+    assert stats["hits"] == 1
+    assert stats["misses"] == 2
+    assert stats["storage_read_ns"] > 0
+    assert stats["lookup_ns"] > 0
+    assert stats["copy_completions"] == 2
+    assert stats["batch_calls"] == 0
+
+
 def test_groute_disabled_bypasses_context_cache_and_shaping(tmp_path):
     filename = tmp_path / "test-file"
     numpy.arange(64 * 1024, dtype=numpy.uint8).tofile(filename)

@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <memory>
+#include <vector>
 
 #include <kvikio/buffer.hpp>
 #include <kvikio/compat_mode.hpp>
@@ -55,6 +56,15 @@ class FileHandle {
                         std::size_t devPtr_offset,
                         bool sync_default_stream,
                         bool consult_host_cache = true);
+  std::future<std::size_t> pread_impl(void* buf,
+                                      std::size_t size,
+                                      std::size_t file_offset,
+                                      std::size_t task_size,
+                                      std::size_t gds_threshold,
+                                      bool sync_default_stream,
+                                      ThreadPool* thread_pool,
+                                      bool already_observed,
+                                      bool consult_host_cache);
 
  public:
   // 644 is a common setting of Unix file permissions: read and write for owner, read-only for group
@@ -284,6 +294,18 @@ class FileHandle {
                                  std::size_t gds_threshold = defaults::gds_threshold(),
                                  bool sync_default_stream  = true,
                                  ThreadPool* thread_pool   = &defaults::thread_pool());
+
+  struct BatchReadRequest {
+    void* buffer{};
+    std::size_t size{};
+    std::size_t file_offset{};
+  };
+
+  /** @brief Process a burst of GPU reads, copying cached lines on stream in one batch. */
+  std::vector<std::future<std::size_t>> pread_batch(
+    std::vector<BatchReadRequest> const& requests,
+    CUstream stream,
+    std::size_t gds_threshold = defaults::gds_threshold());
 
   /**
    * @brief Writes specified bytes from device or host memory into the file in parallel.

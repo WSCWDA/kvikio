@@ -13,6 +13,26 @@ size        = (col[v + 1] - col[v]) * 8
 
 两个 GPU staging slot 构成双缓冲。slot A 上的邻接数据参与 GPU 计算时，slot B 可以提交下一批 KvikIO 请求。计算完成后不把边数据复制回 CPU；BFS frontier 和 PageRank active set 只在每轮边界返回主机，以形成下一轮数据依赖。
 
+### Host Cache 命中路径分段计时和批量读取
+
+图执行器对每个 staging slot 调用一次 `FileHandle::pread_batch`。完成前 64 次请求的原有 profiling 后，Host Cache 对同一批请求的缓存行执行查找和准入；缓存行在持锁期间固定，锁释放后将命中数据排入该 slot 的 CUDA stream，整批只等待一次拷贝完成。未命中请求沿用原 `pread` 后端；一条逻辑请求的准入/策略观察只发生一次。单请求 `pread` 也复用相同的锁外拷贝逻辑。
+
+使用 `KVIKIO_HOST_CACHE_PROFILE=1` 启用计时；时间字段为文件生命周期累计纳秒：`lookup_wait_ns`（等锁）、`lookup_ns`（查找、元数据、缓存分配，剔除存储读时间）、`storage_read_ns`（miss 填充）、`copy_submit_ns`（H2D 提交）、`completion_wait_ns`（等待 CUDA stream）。`batch_calls` 统计多请求批次，`batch_cache_reads` 统计该批次已完成的缓存拷贝请求数，`copy_completions` 统计同步次数；未开启开关时计时字段为零。时间包含不同线程可能重叠的阶段，不能直接相加当作算法耗时。
+
+构建并安装本分支 `libkvikio`，重新编译图执行器后，在小图上先验证正确性和计时：
+
+```bash
+bash scripts/build_graph_e2e.sh
+KVIKIO_HOST_CACHE_PROFILE=1 \
+GRAPH_PREFIX=/home/cwd/dataset/bafsdata/bel/GAP-kron-s20.bel \
+RESULT_ROOT=/mnt/gds/results/groute-cache-batch-smoke \
+ALGORITHMS="bfs pagerank" POLICIES="kvikio_threshold host_direct host_cache" \
+REPEATS=1 BFS_MAX_LEVELS=4 PAGERANK_ITERATIONS=2 \
+PAGE_CACHE_MODE=none PLOT=0 bash scripts/run_graph_e2e_matrix.sh
+```
+
+矩阵脚本验证同算法不同策略的 trace/result 后，查看 `raw_results.csv` 中的 `cache_*_ns`、`cache_batch_calls` 和 `cache_batch_reads`。在 `host_cache` 策略中，当小请求复用并达到准入阈值时，预期 `cache_batch_reads > 0` 且 `cache_copy_completions < cache_batch_reads`；若该图/这些迭代尚无命中，增大 `BFS_MAX_LEVELS` 或 `PAGERANK_ITERATIONS`。计时开关会引入额外取时钟开销，论文性能对比应关闭计时，单独使用上述计时实验做开销归因。若需要测量冷 SSD，请使用 `PAGE_CACHE_MODE=global`（root）和固定预热/冷态边界，避免把 Page Cache 命中误判成 Host Cache 收益。
+
 主表包含六个策略：
 
 | 名称 | 控制方式 | 含义 |

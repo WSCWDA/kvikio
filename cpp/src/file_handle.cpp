@@ -314,6 +314,59 @@ std::future<std::size_t> FileHandle::pread(void* buf,
                                            bool sync_default_stream,
                                            ThreadPool* thread_pool)
 {
+  return pread_impl(buf, size, file_offset, task_size, gds_threshold, sync_default_stream,
+                    thread_pool, false, true);
+}
+
+std::vector<std::future<std::size_t>> FileHandle::pread_batch(
+  std::vector<BatchReadRequest> const& requests, CUstream stream, std::size_t gds_threshold)
+{
+  std::vector<std::future<std::size_t>> futures;
+  futures.reserve(requests.size());
+  // Keep the first profiling window identical to sequential pread calls.
+  if (!_io_context || !_host_cache || !_io_context->profile_complete()) {
+    for (auto const& r : requests) {
+      futures.push_back(pread(r.buffer, r.size, r.file_offset, r.size, gds_threshold, false));
+    }
+    return futures;
+  }
+  for (auto const& r : requests) { _io_context->observe(r.buffer, r.size, r.file_offset, 0); }
+  if (_io_context->policy().cache != CachePolicy::ADMIT) {
+    for (auto const& r : requests) {
+      futures.push_back(pread_impl(r.buffer, r.size, r.file_offset, r.size, gds_threshold,
+                                   false, &defaults::thread_pool(), true, false));
+    }
+    return futures;
+  }
+  std::vector<detail::HostCacheReadRequest> cache_requests;
+  cache_requests.reserve(requests.size());
+  for (auto const& r : requests) {
+    cache_requests.push_back({r.buffer, r.size, r.file_offset});
+  }
+  auto cached = _host_cache->read_batch(_file_direct_off.fd(), _file_direct_on.fd(),
+                                         cache_requests, stream);
+  for (std::size_t i = 0; i < requests.size(); ++i) {
+    auto const& r = requests[i];
+    if (cached[i]) {
+      futures.push_back(make_ready_future(*cached[i]));
+    } else {
+      futures.push_back(pread_impl(r.buffer, r.size, r.file_offset, r.size, gds_threshold,
+                                   false, &defaults::thread_pool(), true, false));
+    }
+  }
+  return futures;
+}
+
+std::future<std::size_t> FileHandle::pread_impl(void* buf,
+                                                std::size_t size,
+                                                std::size_t file_offset,
+                                                std::size_t task_size,
+                                                std::size_t gds_threshold,
+                                                bool sync_default_stream,
+                                                ThreadPool* thread_pool,
+                                                bool already_observed,
+                                                bool consult_host_cache)
+{
   KVIKIO_LOG_DEBUG(
     "FileHandle::pread(buf=%p, size=%zu, file_offset=%zu, task_size=%zu, gds_threshold=%zu, "
     "sync_default_stream=%d)",
@@ -354,10 +407,10 @@ std::future<std::size_t> FileHandle::pread(void* buf,
   }
 
   CUcontext ctx = get_context_from_pointer(buf);
-  if (_io_context) { _io_context->observe(buf, size, file_offset, 0); }
+  if (_io_context && !already_observed) { _io_context->observe(buf, size, file_offset, 0); }
   auto const policy = _io_context ? _io_context->policy() : IOPolicy{};
 
-  if (policy.cache == CachePolicy::ADMIT && _host_cache &&
+  if (consult_host_cache && policy.cache == CachePolicy::ADMIT && _host_cache &&
       _host_cache->eligible(size, file_offset)) {
     PushAndPopContext c(ctx);
     if (auto ret = _host_cache->read(

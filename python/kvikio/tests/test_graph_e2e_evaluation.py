@@ -110,3 +110,31 @@ def test_graph_executor_uses_long_lived_handle_and_double_buffer():
     assert "file_header_bytes + request.edge_begin" in source
     assert "std::sort(frontier.begin(), frontier.end())" in source
     assert "std::sort(active.begin(), active.end())" in source
+    assert "file.pread_batch(reads, reinterpret_cast<CUstream>(stream_)" in source
+
+
+def test_graph_e2e_summary_preserves_cache_timing_and_legacy_results(tmp_path):
+    module = _load_script("summarize_graph_e2e.py")
+    baseline = _result("kvikio_threshold")
+    measured = _result("host_cache")
+    measured["cache"].update(
+        hits=128,
+        lookup_wait_ns=100,
+        lookup_ns=200,
+        storage_read_ns=300,
+        copy_submit_ns=400,
+        completion_wait_ns=500,
+        copy_completions=4,
+        batch_calls=4,
+        batch_cache_reads=128,
+        pinned_bypasses=0,
+    )
+    for row in (baseline, measured):
+        (tmp_path / f'e2e_bfs_{row["policy_mode"]}_r1.json').write_text(
+            json.dumps(row), encoding="utf-8"
+        )
+    rows = module.load_rows(tmp_path)
+    module.validate_correctness(rows)
+    assert rows[0]["cache_batch_reads"] == 128 or rows[1]["cache_batch_reads"] == 128
+    assert sorted(row["cache_lookup_ns"] for row in rows) == [0, 200]
+    assert sorted(row["cache_completion_wait_ns"] for row in rows) == [0, 500]

@@ -295,21 +295,21 @@ class Slot {
     host_requests_.reserve(batch.size());
     futures_.reserve(batch.size());
     expected_bytes_.reserve(batch.size());
+    std::vector<kvikio::FileHandle::BatchReadRequest> reads;
+    reads.reserve(batch.size());
     for (auto const& request : batch) {
       host_requests_.push_back(request.device);
       auto const bytes =
         static_cast<std::size_t>(request.device.edge_count) * sizeof(std::uint64_t);
       auto* destination = static_cast<std::byte*>(edges_) + request.device.buffer_offset;
-      futures_.push_back(file.pread(destination,
-                                    bytes,
-                                    file_header_bytes + request.edge_begin * sizeof(std::uint64_t),
-                                    bytes,
-                                    kvikio::defaults::gds_threshold(),
-                                    false));
+      reads.push_back({destination, bytes,
+                       file_header_bytes + request.edge_begin * sizeof(std::uint64_t)});
       expected_bytes_.push_back(bytes);
       logical_bytes_ += bytes;
       logical_requests_++;
     }
+    futures_ = file.pread_batch(reads, reinterpret_cast<CUstream>(stream_),
+                                kvikio::defaults::gds_threshold());
   }
 
   void finish_io()
@@ -901,7 +901,16 @@ void write_json(Options const& options,
       << "  \"cache\": {\"hits\": " << cache.hits << ", \"misses\": " << cache.misses
       << ", \"storage_bytes\": " << cache.storage_bytes
       << ", \"admitted_regions\": " << cache.admitted_regions
-      << ", \"cache_entries\": " << cache.cache_entries << "},\n"
+      << ", \"cache_entries\": " << cache.cache_entries
+      << ", \"lookup_wait_ns\": " << cache.lookup_wait_ns
+      << ", \"lookup_ns\": " << cache.lookup_ns
+      << ", \"storage_read_ns\": " << cache.storage_read_ns
+      << ", \"copy_submit_ns\": " << cache.copy_submit_ns
+      << ", \"completion_wait_ns\": " << cache.completion_wait_ns
+      << ", \"copy_completions\": " << cache.copy_completions
+      << ", \"batch_calls\": " << cache.batch_calls
+      << ", \"batch_cache_reads\": " << cache.batch_cache_reads
+      << ", \"pinned_bypasses\": " << cache.pinned_bypasses << "},\n"
       << "  \"shaping\": {\"logical_requests\": " << shaping.logical_requests
       << ", \"physical_requests\": " << shaping.physical_requests
       << ", \"submitted_bytes\": " << shaping.submitted_bytes

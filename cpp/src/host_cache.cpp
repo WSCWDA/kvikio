@@ -4,7 +4,12 @@
  */
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <iterator>
 #include <list>
 #include <limits>
 #include <mutex>
@@ -21,6 +26,14 @@
 #include <kvikio/utils.hpp>
 
 namespace kvikio::detail {
+
+namespace {
+using Clock = std::chrono::steady_clock;
+std::uint64_t elapsed_ns(Clock::time_point start)
+{
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count();
+}
+}  // namespace
 
 class RegionAdmission::Impl {
  public:
@@ -131,6 +144,7 @@ class HostCache::Impl {
   struct Entry {
     std::size_t slot{};
     std::size_t valid_bytes{};
+    std::size_t pins{};
     std::list<std::size_t>::iterator lru;
   };
 
@@ -178,6 +192,12 @@ class HostCache::Impl {
   std::size_t max_io_size;
   RegionAdmission admission;
   mutable std::mutex mutex;
+  std::condition_variable copies_complete;
+  std::size_t outstanding_pins{};
+  bool const profile{[] {
+    auto const* value = std::getenv("KVIKIO_HOST_CACHE_PROFILE");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+  }()};
   CudaPageAlignedPinnedAllocator allocator;
   void* storage{};
   void* active_device_pointer{};
@@ -216,73 +236,160 @@ std::optional<std::size_t> HostCache::read(int fd_direct_off,
                                            std::size_t dev_ptr_offset)
 {
   if (!eligible(size, file_offset)) { return std::nullopt; }
+  auto* destination = reinterpret_cast<void*>(
+    reinterpret_cast<std::uintptr_t>(dev_ptr_base) + dev_ptr_offset);
+  PushAndPopContext context_guard{get_context_from_pointer(dev_ptr_base)};
+  auto const stream = StreamCachePerThreadAndContext::get();
+  return read_batch(fd_direct_off, fd_direct_on, {{destination, size, file_offset}}, stream)[0];
+}
 
-  std::lock_guard lock{_impl->mutex};
-  _impl->active_device_pointer = dev_ptr_base;
-
-  auto const line_offset = file_offset - file_offset % _impl->line_size;
-  auto const in_line      = file_offset - line_offset;
-  auto found              = _impl->entries.find(line_offset);
-
-  if (found == _impl->entries.end()) {
-    ++_impl->counters.misses;
-    if (!_impl->admission.should_admit(file_offset)) {
-      _impl->counters.admission_bypass_bytes += size;
-      return std::nullopt;
-    }
-    _impl->ensure_storage();
-    if (_impl->free_slots.empty()) {
-      auto const victim = _impl->lru.back();
-      auto const entry  = _impl->entries.find(victim);
-      _impl->free_slots.push_back(entry->second.slot);
-      _impl->entries.erase(entry);
-      _impl->lru.pop_back();
-      ++_impl->counters.evictions;
-    }
-
-    auto const slot = _impl->free_slots.back();
-    _impl->free_slots.pop_back();
-    auto* line = static_cast<char*>(_impl->storage) + slot * _impl->line_size;
-    ssize_t bytes_read{};
-    try {
-      bytes_read = posix_host_io<IOOperationType::READ, PartialIO::YES>(
-        fd_direct_off, line, _impl->line_size, line_offset, fd_direct_on);
-      KVIKIO_EXPECT(bytes_read > 0, "host cache read reached end of file");
-    } catch (...) {
-      _impl->free_slots.push_back(slot);
-      throw;
-    }
-    _impl->counters.storage_bytes += static_cast<std::uint64_t>(bytes_read);
-    _impl->lru.push_front(line_offset);
-    found = _impl->entries
-              .emplace(line_offset,
-                       Impl::Entry{slot, static_cast<std::size_t>(bytes_read), _impl->lru.begin()})
-              .first;
-  } else {
-    ++_impl->counters.hits;
-    _impl->lru.splice(_impl->lru.begin(), _impl->lru, found->second.lru);
-    found->second.lru = _impl->lru.begin();
+std::vector<std::optional<std::size_t>> HostCache::read_batch(
+  int fd_direct_off,
+  int fd_direct_on,
+  std::vector<HostCacheReadRequest> const& requests,
+  CUstream stream)
+{
+  std::vector<std::optional<std::size_t>> results(requests.size());
+  std::vector<std::size_t> pinned;
+  pinned.reserve(requests.size());
+  CUcontext context{};
+  std::uint64_t submitted_bytes{};
+  {
+    std::lock_guard lock{_impl->mutex};
+    if (requests.size() > 1) { ++_impl->counters.batch_calls; }
   }
+  auto unpin = [&] {
+    std::lock_guard lock{_impl->mutex};
+    for (auto const offset : pinned) {
+      --_impl->entries.at(offset).pins;
+      --_impl->outstanding_pins;
+    }
+    _impl->copies_complete.notify_all();
+    pinned.clear();
+  };
 
-  if (in_line >= found->second.valid_bytes) { return std::size_t{0}; }
-  auto const bytes_to_copy = std::min(size, found->second.valid_bytes - in_line);
-  auto* src = static_cast<char*>(_impl->storage) + found->second.slot * _impl->line_size + in_line;
-  CUcontext context = get_context_from_pointer(dev_ptr_base);
-  PushAndPopContext context_guard{context};
-  auto stream = StreamCachePerThreadAndContext::get();
-  KVIKIO_CUDA_DRIVER_TRY(cudaAPI::cuda_memcpy_async(
-    convert_void2deviceptr(dev_ptr_base) + dev_ptr_offset,
-    convert_void2deviceptr(src),
-    bytes_to_copy,
-    stream));
-  KVIKIO_CUDA_DRIVER_TRY(cudaAPI::instance().StreamSynchronize(stream));
-  _impl->counters.h2d_bytes += bytes_to_copy;
-  return bytes_to_copy;
+  try {
+    for (std::size_t i = 0; i < requests.size(); ++i) {
+      auto const& request = requests[i];
+      if (!eligible(request.size, request.file_offset)) { continue; }
+      auto const lock_start = _impl->profile ? Clock::now() : Clock::time_point{};
+      std::unique_lock lock{_impl->mutex};
+      if (_impl->profile) { _impl->counters.lookup_wait_ns += elapsed_ns(lock_start); }
+      auto const lookup_start = _impl->profile ? Clock::now() : Clock::time_point{};
+      std::uint64_t read_duration{};
+      _impl->active_device_pointer = request.device_ptr;
+      auto const line_offset = request.file_offset - request.file_offset % _impl->line_size;
+      auto const in_line     = request.file_offset - line_offset;
+      auto found            = _impl->entries.find(line_offset);
+      if (found == _impl->entries.end()) {
+        ++_impl->counters.misses;
+        if (!_impl->admission.should_admit(request.file_offset)) {
+          _impl->counters.admission_bypass_bytes += request.size;
+          if (_impl->profile) { _impl->counters.lookup_ns += elapsed_ns(lookup_start); }
+          continue;
+        }
+        _impl->ensure_storage();
+        if (_impl->free_slots.empty()) {
+          auto victim = _impl->lru.rbegin();
+          while (victim != _impl->lru.rend() && _impl->entries.at(*victim).pins != 0) { ++victim; }
+          if (victim == _impl->lru.rend()) {
+            ++_impl->counters.pinned_bypasses;
+            if (_impl->profile) { _impl->counters.lookup_ns += elapsed_ns(lookup_start); }
+            continue;
+          }
+          auto const entry = _impl->entries.find(*victim);
+          _impl->free_slots.push_back(entry->second.slot);
+          _impl->entries.erase(entry);
+          _impl->lru.erase(std::next(victim).base());
+          ++_impl->counters.evictions;
+        }
+        auto const slot = _impl->free_slots.back();
+        _impl->free_slots.pop_back();
+        auto* line = static_cast<char*>(_impl->storage) + slot * _impl->line_size;
+        ssize_t bytes_read{};
+        try {
+          auto const read_start = _impl->profile ? Clock::now() : Clock::time_point{};
+          bytes_read = posix_host_io<IOOperationType::READ, PartialIO::YES>(
+            fd_direct_off, line, _impl->line_size, line_offset, fd_direct_on);
+          if (_impl->profile) {
+            read_duration = elapsed_ns(read_start);
+            _impl->counters.storage_read_ns += read_duration;
+          }
+          KVIKIO_EXPECT(bytes_read > 0, "host cache read reached end of file");
+        } catch (...) {
+          _impl->free_slots.push_back(slot);
+          throw;
+        }
+        _impl->counters.storage_bytes += static_cast<std::uint64_t>(bytes_read);
+        _impl->lru.push_front(line_offset);
+        found = _impl->entries
+                  .emplace(line_offset,
+                           Impl::Entry{slot, static_cast<std::size_t>(bytes_read), 0,
+                                       _impl->lru.begin()})
+                  .first;
+      } else {
+        ++_impl->counters.hits;
+        _impl->lru.splice(_impl->lru.begin(), _impl->lru, found->second.lru);
+        found->second.lru = _impl->lru.begin();
+      }
+      if (in_line >= found->second.valid_bytes) {
+        results[i] = 0;
+        if (_impl->profile) { _impl->counters.lookup_ns += elapsed_ns(lookup_start) - read_duration; }
+        continue;
+      }
+      auto const bytes_to_copy = std::min(request.size, found->second.valid_bytes - in_line);
+      auto const src = static_cast<char*>(_impl->storage) +
+                       found->second.slot * _impl->line_size + in_line;
+      ++found->second.pins;
+      ++_impl->outstanding_pins;
+      pinned.push_back(line_offset);
+      if (_impl->profile) { _impl->counters.lookup_ns += elapsed_ns(lookup_start) - read_duration; }
+      lock.unlock();
+
+      auto const request_context = get_context_from_pointer(request.device_ptr);
+      if (context == nullptr) { context = request_context; }
+      KVIKIO_EXPECT(context == request_context, "batch buffers must use one CUDA context");
+      PushAndPopContext context_guard{context};
+      auto const submit_start = _impl->profile ? Clock::now() : Clock::time_point{};
+      KVIKIO_CUDA_DRIVER_TRY(cudaAPI::cuda_memcpy_async(
+        convert_void2deviceptr(request.device_ptr), convert_void2deviceptr(src),
+        bytes_to_copy, stream));
+      auto const submit_duration = _impl->profile ? elapsed_ns(submit_start) : 0;
+      if (_impl->profile) {
+        std::lock_guard stats_lock{_impl->mutex};
+        _impl->counters.copy_submit_ns += submit_duration;
+      }
+      submitted_bytes += bytes_to_copy;
+      results[i] = bytes_to_copy;
+    }
+    if (context != nullptr) {
+      PushAndPopContext context_guard{context};
+      auto const wait_start = _impl->profile ? Clock::now() : Clock::time_point{};
+      KVIKIO_CUDA_DRIVER_TRY(cudaAPI::instance().StreamSynchronize(stream));
+      auto const wait_duration = _impl->profile ? elapsed_ns(wait_start) : 0;
+      std::lock_guard lock{_impl->mutex};
+      _impl->counters.h2d_bytes += submitted_bytes;
+      ++_impl->counters.copy_completions;
+      if (requests.size() > 1) { _impl->counters.batch_cache_reads += pinned.size(); }
+      if (_impl->profile) { _impl->counters.completion_wait_ns += wait_duration; }
+    }
+  } catch (...) {
+    // All successful submissions must finish before any pinned slot can be reused.
+    if (context != nullptr) {
+      PushAndPopContext context_guard{context};
+      (void)cudaAPI::instance().StreamSynchronize(stream);
+    }
+    unpin();
+    throw;
+  }
+  unpin();
+  return results;
 }
 
 void HostCache::clear() noexcept
 {
-  std::lock_guard lock{_impl->mutex};
+  std::unique_lock lock{_impl->mutex};
+  _impl->copies_complete.wait(lock, [&] { return _impl->outstanding_pins == 0; });
   _impl->entries.clear();
   _impl->lru.clear();
   _impl->free_slots.clear();
