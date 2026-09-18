@@ -147,7 +147,8 @@ defaults::defaults()
   // Host cache is opt-in. The pinned allocation is made lazily on the first eligible read.
   {
     _host_cache_enabled = getenv_or("KVIKIO_HOST_CACHE", false);
-    ssize_t const capacity = getenv_or("KVIKIO_HOST_CACHE_CAPACITY", 1024 * 1024 * 1024);
+    ssize_t const capacity =
+      getenv_or("KVIKIO_HOST_CACHE_CAPACITY", ssize_t{1024} * 1024 * 1024);
     ssize_t const line_size = getenv_or("KVIKIO_HOST_CACHE_LINE_SIZE", 64 * 1024);
     ssize_t const max_io = getenv_or("KVIKIO_HOST_CACHE_MAX_IO_SIZE", 64 * 1024);
     ssize_t const region_size = getenv_or("KVIKIO_HOST_CACHE_REGION_SIZE", 1024 * 1024);
