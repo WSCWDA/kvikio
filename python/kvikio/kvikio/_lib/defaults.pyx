@@ -72,6 +72,27 @@ cdef extern from "<kvikio/defaults.hpp>" namespace "kvikio" nogil:
         "kvikio::defaults::host_cache_max_regions"() except +
     void cpp_set_host_cache_max_regions \
         "kvikio::defaults::set_host_cache_max_regions"(size_t regions) except +
+    bool cpp_host_cache_line_admission "kvikio::defaults::host_cache_line_admission"() except +
+    void cpp_set_host_cache_line_admission \
+        "kvikio::defaults::set_host_cache_line_admission"(bool enabled) except +
+    size_t cpp_host_cache_sketch_bytes "kvikio::defaults::host_cache_sketch_bytes"() except +
+    void cpp_set_host_cache_sketch_bytes \
+        "kvikio::defaults::set_host_cache_sketch_bytes"(size_t value) except +
+    size_t cpp_host_cache_aging_interval "kvikio::defaults::host_cache_aging_interval"() except +
+    void cpp_set_host_cache_aging_interval \
+        "kvikio::defaults::set_host_cache_aging_interval"(size_t value) except +
+    size_t cpp_host_cache_hit_ns "kvikio::defaults::host_cache_hit_ns"() except +
+    void cpp_set_host_cache_hit_ns "kvikio::defaults::set_host_cache_hit_ns"(size_t value) except +
+    size_t cpp_host_cache_fill_ns "kvikio::defaults::host_cache_fill_ns"() except +
+    void cpp_set_host_cache_fill_ns "kvikio::defaults::set_host_cache_fill_ns"(size_t value) except +
+    size_t cpp_host_cache_host_bypass_ns \
+        "kvikio::defaults::host_cache_host_bypass_ns"() except +
+    void cpp_set_host_cache_host_bypass_ns \
+        "kvikio::defaults::set_host_cache_host_bypass_ns"(size_t value) except +
+    size_t cpp_host_cache_gds_bypass_ns \
+        "kvikio::defaults::host_cache_gds_bypass_ns"() except +
+    void cpp_set_host_cache_gds_bypass_ns \
+        "kvikio::defaults::set_host_cache_gds_bypass_ns"(size_t value) except +
     size_t cpp_http_max_attempts "kvikio::defaults::http_max_attempts"() except +
     void cpp_set_http_max_attempts \
         "kvikio::defaults::set_http_max_attempts"(size_t attempts) except +
@@ -242,6 +263,62 @@ def host_cache_max_regions() -> int:
 
 def set_host_cache_max_regions(regions: int) -> None:
     cpp_set_host_cache_max_regions(regions)
+
+
+def host_cache_line_admission() -> bool:
+    return cpp_host_cache_line_admission()
+
+
+def set_host_cache_line_admission(enabled: bool) -> None:
+    cpp_set_host_cache_line_admission(enabled)
+
+
+def host_cache_sketch_bytes() -> int:
+    return cpp_host_cache_sketch_bytes()
+
+
+def set_host_cache_sketch_bytes(value: int) -> None:
+    cpp_set_host_cache_sketch_bytes(value)
+
+
+def host_cache_aging_interval() -> int:
+    return cpp_host_cache_aging_interval()
+
+
+def set_host_cache_aging_interval(value: int) -> None:
+    cpp_set_host_cache_aging_interval(value)
+
+
+def host_cache_hit_ns() -> int:
+    return cpp_host_cache_hit_ns()
+
+
+def set_host_cache_hit_ns(value: int) -> None:
+    cpp_set_host_cache_hit_ns(value)
+
+
+def host_cache_fill_ns() -> int:
+    return cpp_host_cache_fill_ns()
+
+
+def set_host_cache_fill_ns(value: int) -> None:
+    cpp_set_host_cache_fill_ns(value)
+
+
+def host_cache_host_bypass_ns() -> int:
+    return cpp_host_cache_host_bypass_ns()
+
+
+def set_host_cache_host_bypass_ns(value: int) -> None:
+    cpp_set_host_cache_host_bypass_ns(value)
+
+
+def host_cache_gds_bypass_ns() -> int:
+    return cpp_host_cache_gds_bypass_ns()
+
+
+def set_host_cache_gds_bypass_ns(value: int) -> None:
+    cpp_set_host_cache_gds_bypass_ns(value)
 
 
 def http_max_attempts() -> int:

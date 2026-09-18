@@ -112,4 +112,54 @@ TEST(RegionAdmissionTest, validates_configuration)
     (kvikio::detail::RegionAdmission{region_size, line_size, 2, 0}), std::invalid_argument);
 }
 
+TEST(LineAdmissionTest, tracks_lines_independently_and_uses_benefit)
+{
+  // Fill costs 40 us more than bypass; each subsequent hit saves 30 us.
+  kvikio::detail::LineAdmission admission{line_size, 64 * 1024, 256, 2, 10000, 80000};
+  EXPECT_FALSE(admission.should_admit(0, 40000));
+  EXPECT_FALSE(admission.should_admit(4096, 40000));
+  EXPECT_TRUE(admission.should_admit(0, 40000));
+  // A neighboring line in the same region does not inherit admission.
+  EXPECT_FALSE(admission.should_admit(line_size, 40000));
+  EXPECT_EQ(admission.admissions(), 1);
+  EXPECT_EQ(admission.bypasses(), 3);
+}
+
+TEST(LineAdmissionTest, respects_fallback_path_and_clear)
+{
+  kvikio::detail::LineAdmission admission{line_size, 64, 4, 2, 10000, 80000};
+  EXPECT_FALSE(admission.should_admit(0, 15000));
+  EXPECT_FALSE(admission.should_admit(0, 15000));
+  EXPECT_TRUE(admission.should_admit(0, 70000));
+  EXPECT_EQ(admission.aging_steps(), 0);
+  admission.clear();
+  EXPECT_FALSE(admission.should_admit(0, 70000));
+}
+
+TEST(LineAdmissionTest, rejects_invalid_configuration)
+{
+  EXPECT_THROW((kvikio::detail::LineAdmission{line_size, 63, 1, 2, 1, 2}),
+               std::invalid_argument);
+  EXPECT_THROW((kvikio::detail::LineAdmission{line_size, 64, 0, 2, 1, 2}),
+               std::invalid_argument);
+}
+
+TEST(LineAdmissionTest, ages_history_without_full_sketch_scan)
+{
+  kvikio::detail::LineAdmission admission{line_size, 64, 1, 2, 10000, 80000};
+  EXPECT_FALSE(admission.should_admit(0, 70000));
+  EXPECT_FALSE(admission.should_admit(0, 70000));
+  EXPECT_EQ(admission.aging_steps(), 2);
+}
+
+TEST(LineAdmissionTest, cache_hits_reinforce_line_history)
+{
+  kvikio::detail::LineAdmission admission{line_size, 64 * 1024, 256, 2, 10000, 80000};
+  EXPECT_FALSE(admission.should_admit(0, 40000));
+  admission.observe_hit(0);
+  EXPECT_TRUE(admission.should_admit(0, 40000));
+  EXPECT_EQ(admission.admissions(), 1);
+  EXPECT_EQ(admission.bypasses(), 1);
+}
+
 }  // namespace
