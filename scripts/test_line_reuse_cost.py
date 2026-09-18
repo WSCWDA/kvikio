@@ -13,6 +13,7 @@ from pathlib import Path
 import cupy as cp
 import kvikio
 import kvikio.defaults
+from groute_experiment_output import run_experiment
 
 
 LINE = 64 * 1024
@@ -172,4 +173,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run_experiment(main, "line_reuse_cost")
