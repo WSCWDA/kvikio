@@ -42,6 +42,7 @@ def settings(args, mode):
     return {
         "groute_enabled": True,
         "compat_mode": kvikio.CompatMode.ON,
+        "auto_direct_io_read": False,
         "policy_mode": (kvikio.PolicyMode.HOST_DIRECT if not cache_mode
                         else kvikio.PolicyMode.HOST_CACHE),
         "host_cache_enabled": cache_mode,
