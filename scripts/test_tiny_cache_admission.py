@@ -68,6 +68,9 @@ def run(path, mode, rounds, sketch_bytes):
                 for line in (0, i + 2, 1):
                     assert handle.raw_read(gpu, size=SIZE, file_offset=line * LINE) == SIZE
             elapsed_ns = time.perf_counter_ns() - start
+            with path.open("rb") as check:
+                check.seek(LINE)
+                assert cp.asnumpy(gpu[:64]).tobytes() == check.read(64)
     diff = {k: end[k] - begin[k] for k in begin if k != "cache_entries"}
     return {
         "experiment": "tiny_cache", "mode": mode, "rounds": rounds,
