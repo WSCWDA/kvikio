@@ -82,7 +82,8 @@ def settings(line_admission, sketch_bytes=4096, fill_ns=50000):
 
 
 def delta(a, b):
-    return {key: b[key] - a[key] for key in b if key != "cache_entries"}
+    return {key: b[key] - a[key] for key in b
+            if key not in ("cache_entries", "sketch_bytes")}
 
 
 def one_case(path, config, offsets):
@@ -136,7 +137,8 @@ def main():
     _, counts, entries = one_case(args.file, settings(True, args.sketch_bytes, 200000), offsets)
     assert (counts["misses"], counts["hits"], counts["admitted_lines"],
             counts["benefit_bypasses"], entries) == (4, 1, 1, 1, 1), counts
-    print(json.dumps({"experiment": "cost_gate", "stats": counts, "cache_entries": entries}))
+    print(json.dumps({"experiment": "cost_gate", "stats": counts,
+                      "sketch_bytes": args.sketch_bytes, "cache_entries": entries}))
     if not args.no_cpp:
         metadata_bench(max(1000000, args.requests), args.sketch_bytes)
 
@@ -164,6 +166,7 @@ def main():
                 "median_iops": round(len(trace) * 1e9 / median_ns, 2),
                 "lookup_ns_per_request": round(totals["lookup_ns"] / operations, 2),
                 "lookup_wait_ns_per_request": round(totals["lookup_wait_ns"] / operations, 2),
+                "sketch_bytes": args.sketch_bytes if mode == "line" else 0,
                 "cache_entries": entries, "stats_last_run": totals,
             }))
 
