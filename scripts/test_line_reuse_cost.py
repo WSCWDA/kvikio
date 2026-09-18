@@ -94,6 +94,9 @@ def one_case(path, config, offsets):
             for offset in offsets:
                 assert handle.raw_read(gpu, size=SIZE, file_offset=offset) == SIZE
             elapsed = time.perf_counter_ns() - start
+            with path.open("rb") as check:
+                check.seek(offsets[-1])
+                assert cp.asnumpy(gpu[:64]).tobytes() == check.read(64)
             after = handle.host_cache_stats()
     return elapsed, delta(before, after), after["cache_entries"]
 
