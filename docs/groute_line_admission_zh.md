@@ -23,7 +23,7 @@ kvikio.defaults.set({
 
 同名环境变量均以 `KVIKIO_` 大写形式配置，例如 `KVIKIO_HOST_CACHE_LINE_ADMISSION=ON`。上述纳秒成本仅为初始模型值，**不是该设备实测值**；正式实验必须在目标机器上分别测量 Host Cache hit、Host Cache fill、POSIX fallback、GDS fallback 的同粒度请求延迟，然后配置相应值。兼容模式按 Host fallback 建模。`HOST_CACHE` 强制策略进入准入器；`AUTO` 模式即使文件级策略初期绕过 cache，也允许符合大小限制的请求查询新准入器；强制 `GDS_DIRECT` 保持绕过 cache，用于基线实验。
 
-每个合格请求（包括缓存命中）按 `(file handle, offset / cache_line_size)` 更新固定容量的 blocked sketch；只有 miss 才进行准入决策。每个键的四个 4-bit counter 位于同一 64-B CPU cache line；查询取最小值，更新只递增最小值。每 `aging_interval` 个合格请求衰减一个 64-B block，避免一次扫描整个 sketch。每个 handle 的 sketch 空间为 `sketch_bytes`，与文件大小无关。碰撞会高估复用；衰减在各 block 间错开，可能在短时间内高估或低估热点，应在变化 trace 中验证。
+每个合格请求（包括缓存命中）按 `(file handle, offset / cache_line_size)` 更新固定容量的 blocked sketch；只有 miss 才进行准入决策。每个键的四个 4-bit counter 位于同一个 **64-B 对齐**的 CPU cache line；查询取最小值，更新只递增最小值。每 `aging_interval` 个合格请求衰减一个 64-B block，避免一次扫描整个 sketch。每个 handle 的 sketch 空间为 `sketch_bytes`，与文件大小无关。碰撞会高估复用；衰减在各 block 间错开，可能在短时间内高估或低估热点，应在变化 trace 中验证。
 
 令 `r` 为更新前的复用估计、`B` 为当前 fallback 成本、`H` 为命中成本、`F` 为一次 cache fill 加向 GPU 拷贝的成本，准入条件为：
 
