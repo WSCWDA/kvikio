@@ -71,7 +71,8 @@ def run(path, mode, rounds, sketch_bytes):
             with path.open("rb") as check:
                 check.seek(LINE)
                 assert cp.asnumpy(gpu[:64]).tobytes() == check.read(64)
-    diff = {k: end[k] - begin[k] for k in begin if k != "cache_entries"}
+    diff = {k: end[k] - begin[k] for k in begin
+            if k not in ("cache_entries", "sketch_bytes")}
     return {
         "experiment": "tiny_cache", "mode": mode, "rounds": rounds,
         "sketch_bytes": sketch_bytes if mode != "region" else 0,
