@@ -19,6 +19,7 @@
 #include <vector>
 
 #include <kvikio/bounce_buffer.hpp>
+#include <kvikio/defaults.hpp>
 #include <kvikio/detail/posix_io.hpp>
 #include <kvikio/detail/stream.hpp>
 #include <kvikio/host_cache.hpp>
@@ -335,8 +336,10 @@ std::vector<std::optional<std::size_t>> HostCache::read_batch(
         ssize_t bytes_read{};
         try {
           auto const read_start = _impl->profile ? Clock::now() : Clock::time_point{};
+          // Match the POSIX bypass path: only attempt O_DIRECT when the read option is enabled.
+          auto const fill_fd_direct_on = defaults::auto_direct_io_read() ? fd_direct_on : -1;
           bytes_read = posix_host_io<IOOperationType::READ, PartialIO::YES>(
-            fd_direct_off, line, _impl->line_size, line_offset, fd_direct_on);
+            fd_direct_off, line, _impl->line_size, line_offset, fill_fd_direct_on);
           if (_impl->profile) {
             read_duration = elapsed_ns(read_start);
             _impl->counters.storage_read_ns += read_duration;
