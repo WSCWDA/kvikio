@@ -18,13 +18,18 @@ class LineAdmission::Impl {
   Impl(std::size_t line_size, std::size_t sketch_bytes, std::size_t aging_interval,
        std::size_t minimum_accesses, std::uint64_t hit_ns, std::uint64_t fill_ns)
     : line_size{line_size}, aging_interval{aging_interval}, minimum_accesses{minimum_accesses},
-      hit_ns{hit_ns}, fill_ns{fill_ns}, counters(sketch_bytes)
+      hit_ns{hit_ns}, fill_ns{fill_ns}, blocks(sketch_bytes / 64)
   {
     if (line_size == 0 || sketch_bytes < 64 || sketch_bytes % 64 != 0 ||
         aging_interval == 0 || minimum_accesses < 1 || minimum_accesses > 15) {
       throw std::invalid_argument("invalid line admission configuration");
     }
   }
+
+  struct alignas(64) CounterBlock {
+    std::array<std::uint8_t, 64> bytes{};
+  };
+  static_assert(sizeof(CounterBlock) == 64 && alignof(CounterBlock) == 64);
 
   static std::uint64_t mix(std::uint64_t x) noexcept
   {
@@ -36,20 +41,20 @@ class LineAdmission::Impl {
 
   std::uint8_t get(std::size_t block, std::size_t slot) const noexcept
   {
-    auto const byte = counters[block * 64 + slot / 2];
+    auto const byte = blocks[block].bytes[slot / 2];
     return (slot & 1) ? byte >> 4 : byte & 0x0f;
   }
 
   void set(std::size_t block, std::size_t slot, std::uint8_t value) noexcept
   {
-    auto& byte = counters[block * 64 + slot / 2];
+    auto& byte = blocks[block].bytes[slot / 2];
     byte = (slot & 1) ? (byte & 0x0f) | (value << 4) : (byte & 0xf0) | value;
   }
 
   std::uint8_t record(std::size_t file_offset) noexcept
   {
     auto const key = file_offset / line_size;
-    auto const block = mix(key) % (counters.size() / 64);
+    auto const block = mix(key) % blocks.size();
     std::array<std::size_t, 4> slots{};
     std::uint8_t estimate{15};
     for (std::size_t i = 0; i < slots.size(); ++i) {
@@ -64,9 +69,9 @@ class LineAdmission::Impl {
     }
     // One 64-byte aging step per interval avoids a full-sketch pause.
     if (++requests % aging_interval == 0) {
-      auto* data = counters.data() + aging_cursor * 64;
-      for (std::size_t i = 0; i < 64; ++i) { data[i] = (data[i] & 0xee) >> 1; }
-      aging_cursor = (aging_cursor + 1) % (counters.size() / 64);
+      auto& data = blocks[aging_cursor].bytes;
+      for (auto& byte : data) { byte = (byte & 0xee) >> 1; }
+      aging_cursor = (aging_cursor + 1) % blocks.size();
       ++aging_count;
     }
     return estimate;
@@ -77,7 +82,7 @@ class LineAdmission::Impl {
   std::size_t minimum_accesses;
   std::uint64_t hit_ns;
   std::uint64_t fill_ns;
-  std::vector<std::uint8_t> counters;
+  std::vector<CounterBlock> blocks;
   mutable std::mutex mutex;
   std::uint64_t requests{};
   std::size_t aging_cursor{};
@@ -129,7 +134,7 @@ void LineAdmission::observe_hit(std::size_t file_offset)
 void LineAdmission::clear() noexcept
 {
   std::lock_guard lock{_impl->mutex};
-  std::fill(_impl->counters.begin(), _impl->counters.end(), 0);
+  std::fill(_impl->blocks.begin(), _impl->blocks.end(), Impl::CounterBlock{});
   _impl->requests = 0;
   _impl->aging_cursor = 0;
 }
