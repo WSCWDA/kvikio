@@ -38,9 +38,12 @@ def diff(before, after):
     return {key: after[key] - before[key] for key in before if key != "cache_entries"}
 
 
-def read_many(handle, gpu, lines):
+def read_many(handle, gpu, lines, path):
     for line in lines:
         assert handle.raw_read(gpu, size=SIZE, file_offset=line * LINE) == SIZE
+    with path.open("rb") as check:
+        check.seek(lines[-1] * LINE)
+        assert cp.asnumpy(gpu[:64]).tobytes() == check.read(64)
 
 
 def lru_case(path):
@@ -48,7 +51,7 @@ def lru_case(path):
     with kvikio.defaults.set(config(2, 1, 256)):
         with kvikio.CuFile(path, "r") as handle:
             before = handle.host_cache_stats()
-            read_many(handle, gpu, [0, 1, 0, 2, 1])
+            read_many(handle, gpu, [0, 1, 0, 2, 1], path)
             after = handle.host_cache_stats()
     change = diff(before, after)
     result = {"experiment": "lru", "stats": change,
@@ -71,7 +74,7 @@ def phase_case(path, aging):
             )
             for name, lines in stages:
                 before = handle.host_cache_stats()
-                read_many(handle, gpu, lines)
+                read_many(handle, gpu, lines, path)
                 after = handle.host_cache_stats()
                 change = diff(before, after)
                 print(json.dumps({
