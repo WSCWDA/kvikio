@@ -6,6 +6,7 @@
 
 ```python
 import kvikio
+import kvikio.defaults
 
 kvikio.defaults.set({
     "host_cache_enabled": True,
