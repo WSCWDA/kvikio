@@ -42,7 +42,7 @@ def settings(args, mode):
     return {
         "groute_enabled": True,
         "compat_mode": kvikio.CompatMode.ON,
-        "auto_direct_io_read": False,
+        "auto_direct_io_read": args.direct_io,
         "policy_mode": (kvikio.PolicyMode.HOST_DIRECT if not cache_mode
                         else kvikio.PolicyMode.HOST_CACHE),
         "host_cache_enabled": cache_mode,
@@ -91,6 +91,12 @@ def execute(args, mode, repeat, offsets):
     latencies = []
     with kvikio.defaults.set(settings(args, mode)):
         with kvikio.CuFile(args.file, "r") as handle:
+            try:
+                direct_fd_available = bool(handle.open_flags(o_direct=True) & os.O_DIRECT)
+            except (OSError, RuntimeError):
+                direct_fd_available = False
+            if args.direct_io and not direct_fd_available:
+                raise RuntimeError("O_DIRECT is unavailable for this file; cannot run direct I/O comparison")
             block_before = proc_read_bytes()
             cpu_start = time.process_time_ns()
             wall_start = time.perf_counter_ns()
@@ -108,6 +114,8 @@ def execute(args, mode, repeat, offsets):
     output = {
         "mode": mode, "pattern": args.pattern, "repeat": repeat,
         "page_cache_control": args.page_cache, "file": str(args.file),
+        "host_posix_direct_io_requested": args.direct_io,
+        "host_posix_direct_fd_available": direct_fd_available,
         "requests": len(offsets), "cache_lines": args.cache_lines,
         "sketch_bytes": stats["sketch_bytes"], "aging_interval": args.aging_interval,
         "model_ns": {"hit": args.hit_ns, "fill": args.fill_ns, "bypass": args.bypass_ns},
@@ -147,6 +155,8 @@ def main():
     p.add_argument("--bypass-ns", type=int, default=80000)
     p.add_argument("--page-cache", choices=("none", "file"), default="none",
                    help="file attempts POSIX_FADV_DONTNEED before each run")
+    p.add_argument("--direct-io", action="store_true",
+                   help="enable POSIX O_DIRECT for both host bypass and host-cache fills; not GDS")
     args = p.parse_args()
     if args.requests < 3 or args.repeats < 1 or args.cache_lines < 1 or args.working_set_lines < 1:
         p.error("requests >= 3; repeats, cache-lines and working-set-lines must be positive")
