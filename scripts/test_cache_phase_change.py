@@ -35,7 +35,8 @@ def config(capacity_lines, threshold, aging):
 
 
 def diff(before, after):
-    return {key: after[key] - before[key] for key in before if key != "cache_entries"}
+    return {key: after[key] - before[key] for key in before
+            if key not in ("cache_entries", "sketch_bytes")}
 
 
 def read_many(handle, gpu, lines, path):
@@ -54,7 +55,7 @@ def lru_case(path):
             read_many(handle, gpu, [0, 1, 0, 2, 1], path)
             after = handle.host_cache_stats()
     change = diff(before, after)
-    result = {"experiment": "lru", "stats": change,
+    result = {"experiment": "lru", "stats": change, "sketch_bytes": after["sketch_bytes"],
               "cache_entries": after["cache_entries"]}
     print(json.dumps(result))
     assert (change["hits"], change["misses"], change["evictions"],
@@ -81,6 +82,7 @@ def phase_case(path, aging):
                     "experiment": "phase_change", "aging_interval": aging,
                     "stage": name, "requests": len(lines),
                     "hit_ratio": round(change["hits"] / len(lines), 4),
+                    "sketch_bytes": after["sketch_bytes"],
                     "cache_entries": after["cache_entries"], "stats": change,
                 }))
 
