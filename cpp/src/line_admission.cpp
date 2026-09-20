@@ -202,18 +202,29 @@ class WindowedBlockedSketch {
 
     auto const block = mix(key ^ _salt) % _blocks.size();
     std::array<std::size_t, 4> slots{};
-    std::uint8_t estimate{15};
+    auto count = estimate(key);
     for (std::size_t i = 0; i < slots.size(); ++i) {
       slots[i] = mix(key ^ _salt ^ (0x9e3779b97f4a7c15ULL * (i + 1))) % 128;
-      estimate = std::min(estimate, get(block, slots[i]));
     }
-    if (estimate < 15) {
+    if (count < 15) {
       for (auto const slot : slots) {
-        if (get(block, slot) == estimate) { set(block, slot, estimate + 1); }
+        if (get(block, slot) == count) { set(block, slot, count + 1); }
       }
-      ++estimate;
+      ++count;
     }
-    return estimate;
+    return count;
+  }
+
+  [[nodiscard]] std::uint8_t estimate(std::uint64_t key) const noexcept
+  {
+    auto const block = mix(key ^ _salt) % _blocks.size();
+    std::uint8_t result{15};
+    for (std::size_t i = 0; i < 4; ++i) {
+      auto const slot =
+        mix(key ^ _salt ^ (0x9e3779b97f4a7c15ULL * (i + 1))) % 128;
+      result = std::min(result, get(block, slot));
+    }
+    return result;
   }
 
   void clear() noexcept
@@ -310,6 +321,21 @@ FrequencyMomentumDecision FrequencyMomentumAdmission::observe(std::size_t file_o
   auto const key = file_offset / _impl->line_size;
   auto const frequency = _impl->frequency.record(key);
   auto const momentum  = _impl->momentum.record(key);
+  bool const by_frequency = frequency >= _impl->frequency_threshold;
+  bool const by_momentum  = momentum >= _impl->momentum_threshold;
+  auto const signal = by_frequency && by_momentum ? AdmissionSignal::both
+                      : by_frequency              ? AdmissionSignal::frequency
+                      : by_momentum               ? AdmissionSignal::momentum
+                                                  : AdmissionSignal::none;
+  return {by_frequency || by_momentum, frequency, momentum, signal};
+}
+
+FrequencyMomentumDecision FrequencyMomentumAdmission::estimate(std::size_t file_offset) const
+{
+  std::lock_guard lock{_impl->mutex};
+  auto const key       = file_offset / _impl->line_size;
+  auto const frequency = _impl->frequency.estimate(key);
+  auto const momentum  = _impl->momentum.estimate(key);
   bool const by_frequency = frequency >= _impl->frequency_threshold;
   bool const by_momentum  = momentum >= _impl->momentum_threshold;
   auto const signal = by_frequency && by_momentum ? AdmissionSignal::both

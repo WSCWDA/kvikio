@@ -108,7 +108,7 @@ def replay(binary, trace, args, policy, frequency_threshold, momentum_threshold)
         str(binary), str(trace), policy, str(args.cache_lines),
         str(args.frequency_bytes), str(args.frequency_window), str(frequency_threshold),
         str(args.momentum_bytes), str(args.momentum_window), str(momentum_threshold),
-        str(LINE),
+        str(LINE), str(args.hit_ns), str(args.fill_ns), str(args.bypass_ns),
     ]
     runs = []
     for _ in range(args.repeats):
@@ -125,10 +125,14 @@ def replay(binary, trace, args, policy, frequency_threshold, momentum_threshold)
 
 def mark_pareto(records, labeled):
     def dominates(left, right):
-        common = (left["false_admission_rate"] <= right["false_admission_rate"] and
-                  left["hit_ratio"] >= right["hit_ratio"])
-        strict = (left["false_admission_rate"] < right["false_admission_rate"] or
-                  left["hit_ratio"] > right["hit_ratio"])
+        common = (left["net_saved_ns"] >= right["net_saved_ns"] and
+                  left["pollution_misses"] <= right["pollution_misses"] and
+                  left["hot_hit_ratio" if labeled else "hit_ratio"] >=
+                  right["hot_hit_ratio" if labeled else "hit_ratio"])
+        strict = (left["net_saved_ns"] > right["net_saved_ns"] or
+                  left["pollution_misses"] < right["pollution_misses"] or
+                  left["hot_hit_ratio" if labeled else "hit_ratio"] >
+                  right["hot_hit_ratio" if labeled else "hit_ratio"])
         if labeled:
             common = common and (
                 left["mean_detection_delay_requests"] <= right["mean_detection_delay_requests"])
@@ -155,7 +159,14 @@ def main():
     parser.add_argument("--momentum-thresholds", type=int, nargs="+", default=[2, 3, 4])
     parser.add_argument("--repeats", type=int, default=5,
                         help="repeat only for CPU-overhead timing; policy outcomes are deterministic")
-    parser.add_argument("--seed", type=int, default=20260920)
+    parser.add_argument("--seeds", type=int, nargs="+",
+                        default=[20260920, 20260921, 20260922, 20260923, 20260924],
+                        help="synthetic-trace seeds (default: five independent seeds)")
+    parser.add_argument("--seed", type=int,
+                        help="deprecated single-seed shortcut; overrides --seeds")
+    parser.add_argument("--hit-ns", type=int, default=10000)
+    parser.add_argument("--fill-ns", type=int, default=200000)
+    parser.add_argument("--bypass-ns", type=int, default=80000)
     parser.add_argument("--trace", type=Path,
                         help="optional real trace: first column is an offset or line number")
     parser.add_argument("--trace-unit", choices=("bytes", "lines"), default="bytes")
@@ -175,37 +186,47 @@ def main():
         parser.error("thresholds must be in [1, 15]")
     if args.trace_column < 0:
         parser.error("trace-column must be non-negative")
+    if min(args.hit_ns, args.fill_ns, args.bypass_ns) < 0:
+        parser.error("cost-model values must be non-negative")
 
-    traces = (load_real_trace(args.trace, args.trace_unit, args.trace_limit,
-                              args.trace_column)
-              if args.trace else synthetic_traces(args.requests, args.seed))
+    seeds = [args.seed] if args.seed is not None else args.seeds
+    if not seeds:
+        parser.error("at least one seed is required")
     root = ROOT
     with tempfile.TemporaryDirectory() as directory:
         temporary = Path(directory)
         binary = temporary / "frequency_momentum_replay"
         compile_replay(root, binary)
-        for trace_name, events in traces.items():
-            trace_path = temporary / f"{trace_name}.trace"
-            write_trace(trace_path, events)
-            configs = [("cache_all", args.frequency_thresholds[0],
-                        args.momentum_thresholds[0])]
-            configs += [("frequency", f, args.momentum_thresholds[0])
-                        for f in args.frequency_thresholds]
-            configs += [("momentum", args.frequency_thresholds[0], m)
-                        for m in args.momentum_thresholds]
-            configs += [("hybrid", f, m) for f in args.frequency_thresholds
-                        for m in args.momentum_thresholds]
-            records = [replay(binary, trace_path, args, *config) for config in configs]
-            mark_pareto(records, labeled=events[0][2] >= 0)
-            for record in records:
-                record.update(kind="frequency_momentum_ablation", trace=trace_name,
-                              cache_lines=args.cache_lines,
-                              frequency_bytes=args.frequency_bytes,
-                              frequency_window=args.frequency_window,
-                              momentum_bytes=args.momentum_bytes,
-                              momentum_window=args.momentum_window,
-                              seed=args.seed)
-                print(json.dumps(record), flush=True)
+        if args.trace:
+            seed_runs = [(None, load_real_trace(args.trace, args.trace_unit,
+                                                args.trace_limit, args.trace_column))]
+        else:
+            seed_runs = [(seed, synthetic_traces(args.requests, seed)) for seed in seeds]
+        for seed, traces in seed_runs:
+            for trace_name, events in traces.items():
+                trace_path = temporary / f"{trace_name}_{seed}.trace"
+                write_trace(trace_path, events)
+                configs = [("cache_all", args.frequency_thresholds[0],
+                            args.momentum_thresholds[0])]
+                configs += [("frequency", f, args.momentum_thresholds[0])
+                            for f in args.frequency_thresholds]
+                configs += [("momentum", args.frequency_thresholds[0], m)
+                            for m in args.momentum_thresholds]
+                configs += [("hybrid", f, m) for f in args.frequency_thresholds
+                            for m in args.momentum_thresholds]
+                configs += [("dual_score", f, m) for f in args.frequency_thresholds
+                            for m in args.momentum_thresholds]
+                records = [replay(binary, trace_path, args, *config) for config in configs]
+                mark_pareto(records, labeled=events[0][2] >= 0)
+                for record in records:
+                    record.update(kind="frequency_momentum_ablation", trace=trace_name,
+                                  cache_lines=args.cache_lines,
+                                  frequency_bytes=args.frequency_bytes,
+                                  frequency_window=args.frequency_window,
+                                  momentum_bytes=args.momentum_bytes,
+                                  momentum_window=args.momentum_window,
+                                  seed=seed)
+                    print(json.dumps(record), flush=True)
 
 
 if __name__ == "__main__":

@@ -186,6 +186,23 @@ TEST(FrequencyMomentumAdmissionTest, reports_both_signals)
   EXPECT_EQ(admission.metadata_bytes(), 4096 + 64);
 }
 
+TEST(FrequencyMomentumAdmissionTest, estimate_does_not_modify_history)
+{
+  kvikio::detail::FrequencyMomentumAdmission admission{
+    line_size, 4096, 4096, 3, 64, 32, 3};
+  auto first = admission.observe(5 * line_size);
+  auto estimate = admission.estimate(5 * line_size);
+  auto repeated_estimate = admission.estimate(5 * line_size);
+  auto second = admission.observe(5 * line_size);
+  EXPECT_EQ(first.frequency, 1);
+  EXPECT_EQ(estimate.frequency, 1);
+  EXPECT_EQ(repeated_estimate.frequency, 1);
+  EXPECT_EQ(second.frequency, 2);
+  EXPECT_EQ(estimate.momentum, 1);
+  EXPECT_EQ(repeated_estimate.momentum, 1);
+  EXPECT_EQ(second.momentum, 2);
+}
+
 TEST(FrequencyMomentumAdmissionTest, window_is_independent_of_sketch_capacity)
 {
   kvikio::detail::FrequencyMomentumAdmission admission{

@@ -68,6 +68,8 @@ class FrequencyMomentumAdmission {
   FrequencyMomentumAdmission& operator=(FrequencyMomentumAdmission const&) = delete;
 
   [[nodiscard]] FrequencyMomentumDecision observe(std::size_t file_offset);
+  /** Read the current scores without updating counters or advancing aging. */
+  [[nodiscard]] FrequencyMomentumDecision estimate(std::size_t file_offset) const;
   [[nodiscard]] std::uint8_t observe_frequency(std::size_t file_offset);
   [[nodiscard]] std::uint8_t observe_momentum(std::size_t file_offset);
   void clear() noexcept;
