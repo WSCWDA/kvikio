@@ -68,11 +68,15 @@ query batch、epoch 或时间窗口切分 trace 并补充阶段热点标签。
 - `mean_detection_delay_requests`：阶段内热点首次出现到首次进入缓存的请求数；
 - `false_admission_rate`：插入后直到淘汰或 trace 结束都未产生 hit 的比例；
 - `low_value_admission_rate`（兼容别名 `low_value_admission`）：一次驻留期间的收益
-  `hits × (bypass_ns-hit_ns) - (fill_ns-bypass_ns)` 小于等于零的准入比例；
+  `hits × (bypass_ns-hit_ns) + (bypass_ns-fill_ns)` 小于等于零的准入比例；
 - `net_saved_ns`：相对所有请求均 bypass 的模型化净节省：
-  `hits × max(bypass-hit, 0) - admissions × max(fill-bypass, 0)`；
-- `pollution_misses`：低价值准入所淘汰的 victim，在重新驻留前再次被请求而形成的 miss。
-  这是基于真实重放事件的因果归属指标，不是 shadow-cache 的反事实 miss 差；
+  `hits × (bypass-hit) + admissions × (bypass-fill)`。两项都保留符号，因此
+  `fill < bypass` 时会计入准入本身的正收益，`hit > bypass` 时也会计入命中的负收益；
+- `value_model_ns`：上述公式使用的单次 hit 和单次 admission 有符号收益；
+- `pollution_misses`：任意准入所淘汰的 victim，在重新驻留前再次被请求而形成的 miss，
+  不依赖该准入最终是否为 low-value；
+- `low_value_pollution_misses`：上述 pollution miss 中，由最终净收益小于等于零的准入导致
+  的子集。两者都是基于真实重放事件的归属指标，不是 shadow-cache 的反事实 miss 差；
 - `score_rejections`：通过复用阈值、但因 candidate 分数不高于 LRU victim 而被拒绝的次数；
 - `hot_evictions`：插入新 line 时淘汰当前阶段热点的次数；
 - `hot_hit_ratio` / `hit_ratio`：热点请求和全部请求的有效命中率；
@@ -82,6 +86,8 @@ query batch、epoch 或时间窗口切分 trace 并补充阶段热点标签。
 
 默认成本模型为 `hit=10 us`、`fill=200 us`、`bypass=80 us`，可用 `--hit-ns`、
 `--fill-ns`、`--bypass-ns` 替换为目标机器的实测中位数。低价值和净收益结论依赖这三个值。
+node0104 当前 4 KiB/QD=1/64 KiB line 的 Host O_DIRECT 标定值为
+`hit=11915 ns`、`fill=52784 ns`、`bypass=65977 ns`；这不是可移植默认值，重跑时应显式传入。
 
 先从 `phase_shift_aba` 中筛选比 Frequency-only 检测更快的 Hybrid 配置，再检查它在
 `hot_scan_mix` 和 `short_burst` 中的 false admission、hot eviction 是否可接受。只有同一

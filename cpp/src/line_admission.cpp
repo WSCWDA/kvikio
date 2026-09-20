@@ -107,13 +107,16 @@ bool LineAdmission::should_admit(std::size_t file_offset, std::uint64_t bypass_n
   std::lock_guard lock{_impl->mutex};
   auto const estimate = _impl->record(file_offset);
 
-  // Previous observations approximate the number of future uses. Never fill on a first touch.
-  auto const saving = bypass_ns > _impl->hit_ns ? bypass_ns - _impl->hit_ns : 0;
-  auto const extra_fill = _impl->fill_ns > bypass_ns ? _impl->fill_ns - bypass_ns : 0;
-  bool const admit = _impl->minimum_accesses == 1 ||
-                     (static_cast<std::size_t>(estimate) + 1 >= _impl->minimum_accesses &&
-                      estimate > 0 && saving > 0 &&
-                      static_cast<std::uint64_t>(estimate) * saving >= extra_fill);
+  // Relative to bypassing every request, a residency earns B-F on its fill and
+  // r*(B-H) on estimated future hits. Keep the reuse threshold independent of
+  // this signed value test: a cheap fill alone must not silently disable the
+  // configured pollution guard.
+  auto const fill_value = static_cast<long double>(bypass_ns) - _impl->fill_ns;
+  auto const hit_value  = static_cast<long double>(bypass_ns) - _impl->hit_ns;
+  auto const net_value  = fill_value + static_cast<long double>(estimate) * hit_value;
+  bool const reuse_ready =
+    static_cast<std::size_t>(estimate) + 1 >= _impl->minimum_accesses;
+  bool const admit = reuse_ready && net_value > 0;
   if (admit) { ++_impl->admission_count; }
   else {
     ++_impl->bypass_count;

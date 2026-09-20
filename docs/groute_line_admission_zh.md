@@ -25,16 +25,20 @@ kvikio.defaults.set({
 
 每个合格请求（包括缓存命中）按 `(file handle, offset / cache_line_size)` 更新固定容量的 blocked sketch；只有 miss 才进行准入决策。每个键的四个 4-bit counter 位于同一个 **64-B 对齐**的 CPU cache line；查询取最小值，更新只递增最小值。每 `aging_interval` 个合格请求衰减一个 64-B block，避免一次扫描整个 sketch。每个 handle 的 sketch 空间为 `sketch_bytes`，与文件大小无关。碰撞会高估复用；衰减在各 block 间错开，可能在短时间内高估或低估热点，应在变化 trace 中验证。
 
-令 `r` 为更新前的复用估计、`B` 为当前 fallback 成本、`H` 为命中成本、`F` 为一次 cache fill 加向 GPU 拷贝的成本，准入条件为：
+令 `r` 为更新前的复用估计、`B` 为当前 fallback 成本、`H` 为命中成本、`F` 为一次 cache fill 加向 GPU 拷贝的成本。相对全部 bypass，一次驻留的估计净收益为：
+
+```text
+V = (B - F) + r * (B - H)
+```
+
+准入要求同时满足：
 
 ```text
 r + 1 >= admission_threshold
-r > 0
-B > H
-r * (B - H) >= max(F - B, 0)
+V > 0
 ```
 
-阈值为 1 时保留 cache-all 基线行为。这里 `r` 被当作未来复用次数的低开销代理，不是未来访问次数的无偏预测。实际填充仍可能因锁竞争、Linux Page Cache、GDS 兼容模式、读放大和并发发生偏差。无论成本模型如何，cache hit 总是直接返回；容量满且所有条目都在 GPU copy 中被 pin 时仍回退原路径。
+公式保留两个差值的符号：`F < B` 时 fill 本身产生正收益，`H > B` 时未来命中反而产生负收益。最低访问门槛仍然是独立的 pollution guard；阈值为 1 也不会绕过收益判断。这里 `r` 被当作未来复用次数的低开销代理，不是未来访问次数的无偏预测。实际填充仍可能因锁竞争、Linux Page Cache、GDS 兼容模式、读放大和并发发生偏差。无论成本模型如何，cache hit 总是直接返回；容量满且所有条目都在 GPU copy 中被 pin 时仍回退原路径。
 
 `host_cache_stats()` 新增 `sketch_bytes`、`sketch_aging_steps`、`benefit_bypasses`、`admitted_lines`。后两项分别统计已达到访问门槛但收益不足的 miss，以及通过准入判断的 miss；不是不同 line 的精确去重计数。原有 region 元数据统计在新策略下为零。
 

@@ -136,6 +136,25 @@ TEST(LineAdmissionTest, respects_fallback_path_and_clear)
   EXPECT_FALSE(admission.should_admit(0, 70000));
 }
 
+TEST(LineAdmissionTest, uses_signed_fill_value_without_disabling_reuse_threshold)
+{
+  // The measured-style tuple makes the fill itself cheaper than bypass, but a
+  // threshold of two still rejects the first observation as a pollution guard.
+  kvikio::detail::LineAdmission admission{line_size, 64 * 1024, 256, 2, 12000, 53000};
+  EXPECT_FALSE(admission.should_admit(0, 66000));
+  EXPECT_TRUE(admission.should_admit(0, 66000));
+}
+
+TEST(LineAdmissionTest, threshold_one_still_requires_positive_value)
+{
+  kvikio::detail::LineAdmission beneficial{line_size, 64 * 1024, 256, 1, 12000, 53000};
+  EXPECT_TRUE(beneficial.should_admit(0, 66000));
+
+  kvikio::detail::LineAdmission harmful{line_size, 64 * 1024, 256, 1, 70000, 80000};
+  EXPECT_FALSE(harmful.should_admit(0, 60000));
+  EXPECT_EQ(harmful.benefit_bypasses(), 1);
+}
+
 TEST(LineAdmissionTest, rejects_invalid_configuration)
 {
   EXPECT_THROW((kvikio::detail::LineAdmission{line_size, 63, 1, 2, 1, 2}),

@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <list>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -68,7 +69,11 @@ int main(int argc, char** argv)
   bool const valid_policy = policy == "cache_all" || policy == "frequency" ||
                             policy == "momentum" || policy == "hybrid" ||
                             policy == "dual_score";
-  if (capacity == 0 || !valid_policy) { throw std::invalid_argument("invalid policy or capacity"); }
+  auto const max_cost = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+  if (capacity == 0 || !valid_policy || hit_ns > max_cost || fill_ns > max_cost ||
+      bypass_ns > max_cost) {
+    throw std::invalid_argument("invalid policy, capacity, or cost");
+  }
 
   std::ifstream input{trace_path};
   if (!input) { throw std::runtime_error("cannot open trace"); }
@@ -99,11 +104,13 @@ int main(int argc, char** argv)
   std::map<Episode, std::size_t> first_hot;
   std::map<Episode, std::size_t> detected_hot;
 
-  auto const saved_per_hit = bypass_ns > hit_ns ? bypass_ns - hit_ns : 0;
-  auto const extra_fill = fill_ns > bypass_ns ? fill_ns - bypass_ns : 0;
+  auto const hit_value = static_cast<std::int64_t>(bypass_ns) -
+                         static_cast<std::int64_t>(hit_ns);
+  auto const fill_value = static_cast<std::int64_t>(bypass_ns) -
+                          static_cast<std::int64_t>(fill_ns);
   std::uint64_t hits{}, misses{}, admissions{}, rejected{}, evictions{};
   std::uint64_t false_admissions{}, useful_admissions{}, low_value_admissions{};
-  std::uint64_t pollution_misses{}, score_rejections{};
+  std::uint64_t pollution_misses{}, low_value_pollution_misses{}, score_rejections{};
   std::uint64_t hot_hits{}, hot_requests{}, cold_requests{}, cold_admissions{}, hot_evictions{};
   std::uint64_t by_frequency{}, by_momentum{}, by_both{};
   auto finalize = [&](std::size_t admission_id) {
@@ -112,10 +119,12 @@ int main(int argc, char** argv)
     record.finalized = true;
     if (record.hits == 0) { ++false_admissions; }
     else { ++useful_admissions; }
-    record.low_value = record.hits * saved_per_hit <= extra_fill;
+    auto const residency_value =
+      static_cast<std::int64_t>(record.hits) * hit_value + fill_value;
+    record.low_value = residency_value <= 0;
     if (record.low_value) {
       ++low_value_admissions;
-      if (record.victim_reaccessed) { ++pollution_misses; }
+      if (record.victim_reaccessed) { ++low_value_pollution_misses; }
     }
   };
 
@@ -154,7 +163,8 @@ int main(int argc, char** argv)
     if (displaced != pending_evictions.end()) {
       auto& cause = admission_records.at(displaced->second);
       cause.victim_reaccessed = true;
-      if (cause.finalized && cause.low_value) { ++pollution_misses; }
+      ++pollution_misses;
+      if (cause.finalized && cause.low_value) { ++low_value_pollution_misses; }
       pending_evictions.erase(displaced);
     }
 
@@ -231,8 +241,8 @@ int main(int argc, char** argv)
   auto ratio = [](std::uint64_t numerator, std::uint64_t denominator) {
     return denominator == 0 ? 0.0 : static_cast<double>(numerator) / denominator;
   };
-  auto const net_saved_ns = static_cast<std::int64_t>(hits * saved_per_hit) -
-                            static_cast<std::int64_t>(admissions * extra_fill);
+  auto const net_saved_ns = static_cast<std::int64_t>(hits) * hit_value +
+                            static_cast<std::int64_t>(admissions) * fill_value;
   std::cout << "{\"policy\":\"" << policy << "\",\"requests\":" << events.size()
             << ",\"hits\":" << hits << ",\"misses\":" << misses
             << ",\"hit_ratio\":" << ratio(hits, events.size())
@@ -244,6 +254,7 @@ int main(int argc, char** argv)
             << ",\"low_value_admission\":" << ratio(low_value_admissions, admissions)
             << ",\"low_value_admission_rate\":" << ratio(low_value_admissions, admissions)
             << ",\"pollution_misses\":" << pollution_misses
+            << ",\"low_value_pollution_misses\":" << low_value_pollution_misses
             << ",\"net_saved_ns\":" << net_saved_ns
             << ",\"net_saved_ns_per_request\":" << static_cast<double>(net_saved_ns) / events.size()
             << ",\"useful_admissions\":" << useful_admissions
@@ -264,6 +275,8 @@ int main(int argc, char** argv)
                                                                : tracker.metadata_bytes())
             << ",\"cost_model_ns\":{\"hit\":" << hit_ns << ",\"fill\":" << fill_ns
             << ",\"bypass\":" << bypass_ns << "}"
+            << ",\"value_model_ns\":{\"per_hit\":" << hit_value
+            << ",\"per_admission\":" << fill_value << "}"
             << ",\"admission_reason\":{\"frequency\":" << by_frequency
             << ",\"momentum\":" << by_momentum << ",\"both\":" << by_both << "}}\n";
 }
