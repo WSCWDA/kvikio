@@ -162,4 +162,51 @@ TEST(LineAdmissionTest, cache_hits_reinforce_line_history)
   EXPECT_EQ(admission.bypasses(), 1);
 }
 
+TEST(FrequencyMomentumAdmissionTest, momentum_detects_a_new_hot_line_first)
+{
+  kvikio::detail::FrequencyMomentumAdmission admission{
+    line_size, 4096, 4096, 4, 64, 32, 2};
+  auto first = admission.observe(7 * line_size);
+  auto second = admission.observe(7 * line_size);
+  EXPECT_FALSE(first.admit);
+  EXPECT_TRUE(second.admit);
+  EXPECT_EQ(second.signal, kvikio::detail::AdmissionSignal::momentum);
+  EXPECT_EQ(second.frequency, 2);
+  EXPECT_EQ(second.momentum, 2);
+}
+
+TEST(FrequencyMomentumAdmissionTest, reports_both_signals)
+{
+  kvikio::detail::FrequencyMomentumAdmission admission{
+    line_size, 4096, 4096, 2, 64, 32, 2};
+  EXPECT_FALSE(admission.observe(0).admit);
+  auto second = admission.observe(0);
+  EXPECT_TRUE(second.admit);
+  EXPECT_EQ(second.signal, kvikio::detail::AdmissionSignal::both);
+  EXPECT_EQ(admission.metadata_bytes(), 4096 + 64);
+}
+
+TEST(FrequencyMomentumAdmissionTest, window_is_independent_of_sketch_capacity)
+{
+  kvikio::detail::FrequencyMomentumAdmission admission{
+    line_size, 128, 8, 15, 64, 8, 15};
+  for (std::size_t i = 0; i < 8; ++i) { (void)admission.observe(i * line_size); }
+  // Both trackers complete exactly one distributed sweep in eight observations.
+  EXPECT_EQ(admission.frequency_aging_steps(), 2);
+  EXPECT_EQ(admission.momentum_aging_steps(), 1);
+}
+
+TEST(FrequencyMomentumAdmissionTest, rejects_invalid_configuration)
+{
+  EXPECT_THROW((kvikio::detail::FrequencyMomentumAdmission{
+                 line_size, 63, 8, 2, 64, 8, 2}),
+               std::invalid_argument);
+  EXPECT_THROW((kvikio::detail::FrequencyMomentumAdmission{
+                 line_size, 64, 0, 2, 64, 8, 2}),
+               std::invalid_argument);
+  EXPECT_THROW((kvikio::detail::FrequencyMomentumAdmission{
+                 line_size, 64, 8, 16, 64, 8, 2}),
+               std::invalid_argument);
+}
+
 }  // namespace
