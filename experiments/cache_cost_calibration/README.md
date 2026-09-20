@@ -16,7 +16,7 @@ allocated file of at least 512 MiB. A 2 GiB file leaves room for larger follow-u
 
 ```bash
 bash experiments/cache_cost_calibration/prepare_data.sh \
-  /mnt/gds/groute-cache-cost.bin 2
+  /mnt/gds/groute-cache-cost.bin 2 run_01
 ```
 
 Do not use `truncate` or `fallocate` alone: sparse/unwritten extents can return zeros without
@@ -58,10 +58,10 @@ Pass the calibration directory printed by `run.py`:
 
 ```bash
 python experiments/cache_cost_calibration/analyze.py \
-  --input /mnt/gds/results/groute_cache_cost_calibration_<timestamp>_<id>
+  --input /mnt/gds/results/groute_cache_cost_calibration/run_01
 ```
 
-The analysis is saved to a new `groute_cache_cost_analysis_*` directory. It reports the median of
+The analysis is saved to `groute_cache_cost_analysis/run_XX`. It reports the median of
 the seven per-run p50 values and computes:
 
 ```text

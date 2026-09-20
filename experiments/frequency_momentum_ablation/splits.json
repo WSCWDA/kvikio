@@ -1,0 +1,18 @@
+{
+  "tuning": {
+    "traces": ["stable_zipf", "phase_shift_aba"],
+    "seeds": [20260920, 20260921, 20260922, 20260923, 20260924]
+  },
+  "validation": {
+    "traces": ["stable_zipf", "phase_shift_aba"],
+    "seeds": [20260925, 20260926, 20260927]
+  },
+  "final_in_domain": {
+    "traces": ["stable_zipf", "phase_shift_aba"],
+    "seeds": [20261001, 20261002, 20261003, 20261004, 20261005, 20261006]
+  },
+  "final_heldout_trace": {
+    "traces": ["hot_scan_mix", "two_reference_burst"],
+    "seeds": [20261001, 20261002, 20261003, 20261004, 20261005, 20261006]
+  }
+}

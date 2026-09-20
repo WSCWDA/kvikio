@@ -3,12 +3,17 @@ set -euo pipefail
 
 FILE=${1:-/mnt/gds/groute-cache-cost.bin}
 SIZE_GIB=${2:-2}
+RUN_ID=${3:-run_01}
 RESULT_ROOT=/mnt/gds/results
-STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-RESULT_DIR="${RESULT_ROOT}/groute_cache_cost_data_${STAMP}_$$"
+RESULT_DIR="${RESULT_ROOT}/groute_cache_cost_data/${RUN_ID}"
 
 if (( SIZE_GIB < 1 )); then
   echo "SIZE_GIB must be at least 1" >&2
+  exit 2
+fi
+if [[ -e "${RESULT_DIR}" ]]; then
+  echo "Result directory already exists: ${RESULT_DIR}" >&2
+  echo "Choose another run ID, for example run_02." >&2
   exit 2
 fi
 mkdir -p "${RESULT_DIR}"
