@@ -118,7 +118,12 @@ FileHandle::FileHandle(std::string const& file_path,
                                                         defaults::host_cache_max_io_size(),
                                                         defaults::host_cache_region_size(),
                                                         defaults::host_cache_admission_threshold(),
-                                                        defaults::host_cache_max_regions());
+                                                        defaults::host_cache_max_regions(),
+                                                        defaults::host_cache_line_admission(),
+                                                        defaults::host_cache_sketch_bytes(),
+                                                        defaults::host_cache_aging_interval(),
+                                                        defaults::host_cache_hit_ns(),
+                                                        defaults::host_cache_fill_ns());
     }
   }
 }
@@ -249,14 +254,21 @@ std::size_t FileHandle::read_impl(void* devPtr_base,
                                   bool consult_host_cache)
 {
   auto const policy = _io_context ? _io_context->policy() : IOPolicy{};
-  if (consult_host_cache && policy.cache == CachePolicy::ADMIT && _host_cache &&
+  if (consult_host_cache && _host_cache &&
+      (policy.cache == CachePolicy::ADMIT ||
+       (_host_cache->line_admission_enabled() && _io_context &&
+        _io_context->policy_mode() == PolicyMode::AUTO)) &&
       _host_cache->eligible(size, file_offset)) {
     if (auto ret = _host_cache->read(_file_direct_off.fd(),
                                      _file_direct_on.fd(),
                                      devPtr_base,
                                      size,
                                      file_offset,
-                                     devPtr_offset)) {
+                                     devPtr_offset,
+                                     get_compat_mode_manager().is_compat_mode_preferred() ||
+                                             policy.path == IOPath::HOST_MEDIATED
+                                       ? defaults::host_cache_host_bypass_ns()
+                                       : defaults::host_cache_gds_bypass_ns())) {
       return *ret;
     }
   }
@@ -331,7 +343,9 @@ std::vector<std::future<std::size_t>> FileHandle::pread_batch(
     return futures;
   }
   for (auto const& r : requests) { _io_context->observe(r.buffer, r.size, r.file_offset, 0); }
-  if (_io_context->policy().cache != CachePolicy::ADMIT) {
+  if (_io_context->policy().cache != CachePolicy::ADMIT &&
+      !(_host_cache->line_admission_enabled() &&
+        _io_context->policy_mode() == PolicyMode::AUTO)) {
     for (auto const& r : requests) {
       futures.push_back(pread_impl(r.buffer, r.size, r.file_offset, r.size, gds_threshold,
                                    false, &defaults::thread_pool(), true, false));
@@ -344,7 +358,11 @@ std::vector<std::future<std::size_t>> FileHandle::pread_batch(
     cache_requests.push_back({r.buffer, r.size, r.file_offset});
   }
   auto cached = _host_cache->read_batch(_file_direct_off.fd(), _file_direct_on.fd(),
-                                         cache_requests, stream);
+                                         cache_requests, stream,
+                                         get_compat_mode_manager().is_compat_mode_preferred() ||
+                                                 _io_context->policy().path == IOPath::HOST_MEDIATED
+                                           ? defaults::host_cache_host_bypass_ns()
+                                           : defaults::host_cache_gds_bypass_ns());
   for (std::size_t i = 0; i < requests.size(); ++i) {
     auto const& r = requests[i];
     if (cached[i]) {
@@ -410,11 +428,21 @@ std::future<std::size_t> FileHandle::pread_impl(void* buf,
   if (_io_context && !already_observed) { _io_context->observe(buf, size, file_offset, 0); }
   auto const policy = _io_context ? _io_context->policy() : IOPolicy{};
 
-  if (consult_host_cache && policy.cache == CachePolicy::ADMIT && _host_cache &&
+  if (consult_host_cache && _host_cache &&
+      (policy.cache == CachePolicy::ADMIT ||
+       (_host_cache->line_admission_enabled() && _io_context &&
+        _io_context->policy_mode() == PolicyMode::AUTO)) &&
       _host_cache->eligible(size, file_offset)) {
     PushAndPopContext c(ctx);
     if (auto ret = _host_cache->read(
-          _file_direct_off.fd(), _file_direct_on.fd(), buf, size, file_offset, 0)) {
+          _file_direct_off.fd(), _file_direct_on.fd(), buf, size, file_offset, 0,
+          get_compat_mode_manager().is_compat_mode_preferred() ||
+                  policy.path == IOPath::HOST_MEDIATED ||
+                  (size < gds_threshold && _io_context &&
+                   _io_context->policy_mode() == PolicyMode::AUTO &&
+                   !_io_context->profile_complete())
+            ? defaults::host_cache_host_bypass_ns()
+            : defaults::host_cache_gds_bypass_ns())) {
       return make_ready_future(*ret);
     }
   }
