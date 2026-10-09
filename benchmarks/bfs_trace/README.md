@@ -74,6 +74,7 @@ git checkout 315fadfc5c5c018a64596157bfac94ecbb7d87a2
 git submodule update --init --recursive
 python3 "$KVIKIO_BFS_ROOT/benchmarks/bfs_trace/apply_bam_trace.py" "$PWD"
 git diff --check
+export BAM_BFS_ROOT="$PWD"
 cmake -S . -B build
 cmake --build build --target libnvm -j 8
 cmake --build build --target benchmarks -j 8
@@ -87,26 +88,189 @@ cmake --build build --target benchmarks -j 8
 文件系统 replay 的 SSD 需要绑定 Linux NVMe 驱动，两种访问方式通常不能同时用于同一 SSD。
 先采集，再在文件系统设备上 replay；也可使用另一块同型号 SSD并在报告中说明。
 
+## 3.1 集中配置项目、数据集和结果路径
+
+**数据集路径由命令行指定，不需要修改 KvikIO 的源码或 settings.h。**
+建议在执行采集、数据准备和 replay 的同一个 shell 中设置以下变量；切换终端后重新设置。
+这些 export 只是教程的命令组织方式，程序不会自动读取 GRAPH_PREFIX、BFS_EDGE_FILE 等变量，
+必须像后面的示例一样把它们传入 `-f`、`--edge-file` 等参数。
+
+```bash
+# 修改这三项为你的实际目录；项目路径使用 clone 后的绝对路径。
+export KVIKIO_BFS_ROOT=/path/to/kvikio-bfs
+export BAM_BFS_ROOT=/path/to/bam-bfs-trace
+export GRAPH_PREFIX=/mnt/dataset/graph/uk-2007-05.bel
+
+# BaM 使用的两个现有数据文件，不是目录。
+export GRAPH_COL="${GRAPH_PREFIX}.col"
+export GRAPH_DST="${GRAPH_PREFIX}.dst"
+
+# replay 文件放在支持原生 GDS 的已挂载文件系统中。
+export BFS_EDGE_FILE=/mnt/gds/uk-2007-05_edges_4k.bin
+
+# 采集参数：根节点必须属于该图，且建议为有出边的非零顶点。
+export BFS_SOURCE=12345
+export BFS_PAGE_BYTES=4096
+export BFS_GPU=0
+export BFS_GPU_CACHE_PAGES=1024
+export BFS_RAW_OFFSET=0
+
+# 按实验目的和轮次组织结果；不要重复使用已有输出目录。
+export BFS_RESULT_ROOT="$KVIKIO_BFS_ROOT/results/bfs_path_opportunity"
+export BFS_CAPTURE_DIR="$BFS_RESULT_ROOT/capture/run_01"
+export BFS_REPLAY_DIR="$BFS_RESULT_ROOT/replay/run_01"
+export BFS_TRACE_PREFIX="$BFS_CAPTURE_DIR/bfs"
+export BFS_PAGES="${BFS_TRACE_PREFIX}_run_0_pages.csv"
+export BFS_LEVELS="${BFS_TRACE_PREFIX}_run_0_levels.csv"
+export BFS_COMPLETE="${BFS_TRACE_PREFIX}_run_0_complete"
+export BFS_DIRECT_CONFIG="$BFS_RESULT_ROOT/config/cufile_direct.json"
+
+mkdir -p "$BFS_CAPTURE_DIR" "$BFS_REPLAY_DIR" "$BFS_RESULT_ROOT/config"
+```
+
+| 变量 / 参数 | 含义 | 示例 |
+|---|---|---|
+| GRAPH_PREFIX → `-f` | 图路径前缀，程序自动追加 `.col` / `.dst` | `/mnt/dataset/graph/uk-2007-05.bel` |
+| GRAPH_DST | 原始带 header 的 edge 文件 | `uk-2007-05.bel.dst` |
+| BFS_EDGE_FILE → `--edge-file` | 去 header、补齐后的文件系统 edge payload | `/mnt/gds/uk-2007-05_edges_4k.bin` |
+| BFS_RAW_OFFSET → `--loffset` | edge payload 在 BaM 裸设备中的字节偏移 | `0` 或部署时指定的对齐偏移 |
+| BFS_TRACE_PREFIX | 采集输出文件名前缀 | `capture/run_01/bfs` |
+| BFS_PAGES / BFS_LEVELS | 同一次 BFS run 的页事件和层指标 | `bfs_run_0_pages.csv` / `bfs_run_0_levels.csv` |
+
+`-f` 后面不能填目录，也不能填 `.col` 或 `.dst` 完整文件名。
+例如 `-f /mnt/dataset/graph/uk-2007-05.bel.dst` 会导致程序寻找
+`uk-2007-05.bel.dst.col` 和 `uk-2007-05.bel.dst.dst`，从而打开失败。
+`uk-2007-05.bel` 本身不一定要存在；必须存在的是加后缀后的两个文件。
+
+## 3.2 先检查数据格式、根节点与容量
+
+下面只检查现有文件，不构建图、不访问裸设备、不扫描完整 edge 数组。
+`.col` 的首个 uint64 是 offsets 数量，BaM 用它减 1 得到顶点数；
+`.dst` 的首个 uint64 是 edge 数量，随后均有一个 typeT字段。
+两文件的实际数组均从第 16 字节开始。该教程适用于 BaM 的 uint64 CSR 数据，
+不能直接输入文本 edge list、SIFT 向量或其它 ANN 数据。
+
+```bash
+python3 - <<'PY'
+import os
+import struct
+from pathlib import Path
+import numpy as np
+
+col, dst = Path(os.environ['GRAPH_COL']), Path(os.environ['GRAPH_DST'])
+for path in (col, dst):
+    if not path.is_file():
+        raise SystemExit(f'找不到数据文件: {path}')
+
+def header(path):
+    with path.open('rb') as f:
+        raw = f.read(16)
+    if len(raw) != 16:
+        raise SystemExit(f'文件头不足16字节: {path}')
+    return struct.unpack('<QQ', raw)
+
+n_offsets, col_type = header(col)
+n_edges, dst_type = header(dst)
+if n_offsets < 2 or col.stat().st_size < 16 + n_offsets*8:
+    raise SystemExit('col offsets 数量/文件长度不匹配')
+if dst.stat().st_size < 16 + n_edges*8:
+    raise SystemExit('dst edge 数量/文件长度不匹配')
+vertices = n_offsets-1
+root = int(os.environ['BFS_SOURCE'])
+page = int(os.environ['BFS_PAGE_BYTES'])
+offset = int(os.environ['BFS_RAW_OFFSET'])
+if page < 4096 or page & (page-1):
+    raise SystemExit('page_size 必须为 >=4096 的2的幂')
+if offset < 0 or offset % page:
+    raise SystemExit('裸设备 offset 必须非负且按 page_size 对齐')
+if not 0 < root < vertices:
+    raise SystemExit(f'请选非零合法根节点: 0 < src < {vertices}')
+offsets = np.memmap(col, dtype='<u8', mode='r', offset=16, shape=(n_offsets,))
+if int(offsets[0]) != 0 or int(offsets[-1]) != n_edges:
+    raise SystemExit('CSR 首末 offset 与 edge 数量不一致')
+# 分块检查，避免一次性创建全图大小的差分数组。
+for begin in range(0, n_offsets-1, 1_000_000):
+    part = offsets[begin:min(n_offsets, begin+1_000_001)]
+    if np.any(part[1:] < part[:-1]):
+        raise SystemExit(f'CSR offsets 非单调，检查位置附近: {begin}')
+degree = int(offsets[root+1])-int(offsets[root])
+if degree == 0:
+    raise SystemExit('源节点没有出边；换一个源节点进行路径机会测试')
+payload = n_edges*8
+padded = ((payload+page-1)//page)*page
+print(f'vertices={vertices}, edges={n_edges}, src={root}, degree={degree}')
+print(f'header typeT: col={col_type}, dst={dst_type}（不推断其枚举含义）')
+print(f'edge payload={payload} B; replay padded={padded} B')
+print(f'裸设备至少需覆盖字节区间 [{offset}, {offset+padded})')
+print(f'GPU edge cache={int(os.environ["BFS_GPU_CACHE_PAGES"])*page} B')
+print('以上为格式检查；未验证所有 edge IDs 和裸设备中的实际内容。')
+PY
+
+df -h "$(dirname "$BFS_EDGE_FILE")"
+findmnt -T "$(dirname "$BFS_EDGE_FILE")"
+```
+
+确认 replay 输出所在目录已经存在、空间足够，且确实位于目标 SSD 的文件系统上。
+不要把原始 `.dst` 删除：BaM 在初始化时仍需读取其 header，prepare_edges.py 也用它生成相同 payload。
+真正的大图中 vertex offsets、labels、frontier 和 trace buffer也需要 GPU 内存；
+4 MiB edge cache 不代表整个 BFS 仅需4 MiB显存。
+
+## 3.3 区分 BaM 裸设备布局与文件系统布局
+
+**仅设置 `-f` 或生成 BFS_EDGE_FILE，都不会部署 BaM 裸设备数据。**
+BaM 初始化从文件读取 CSR offsets及edge计数，运行中的 `seq_read()` 从 libnvm控制器读取 edges。
+Host/GDS replay 则对 Linux 文件系统中的 BFS_EDGE_FILE 做读取。
+
+同一逻辑页 p 应满足：
+
+| 数据副本 | 页 p 对应的字节位置 |
+|---|---|
+| 原始 GRAPH_DST | `16 + p * BFS_PAGE_BYTES`，末页只含部分有效edges时不足一页 |
+| BaM 裸设备上的 edge payload | `BFS_RAW_OFFSET + p * BFS_PAGE_BYTES` |
+| 文件系统 BFS_EDGE_FILE | `p * BFS_PAGE_BYTES`，末页由 prepare_edges.py 补零 |
+
+BaM readwrite程序涉及的参数如下；先用其 `--help` 核对本地构建。
+
+| readwrite 参数 | 数据部署时的含义 |
+|---|---|
+| `--input` / `-f` | 实际要写入裸设备的源文件 |
+| `--ioffset` / `-i` | 源文件起始字节偏移；用原始 `.dst` 时为16，用去header后的payload时为0 |
+| `--loffset` / `-l` | 目标裸设备字节偏移，必须与 BFS 的 BFS_RAW_OFFSET 一致 |
+| `--access_type` | 上游定义0为读、1为写；部署会写入裸设备 |
+| `--n_ctrls` | 本测试只使用一个控制器 |
+
+不要把已有数据或已挂载文件系统所在 SSD 当作裸设备部署目标；裸设备写入会覆盖指定区域。
+本教程不执行数据部署或设备解绑；沿用你已验证的 BaM部署流程。
+尤其要检查最后一批的 padding 和实际写入范围，不能仅依据 payload大小判断上游writer不会越过它。
+如果还没有可正确运行的 BaM数据布局，先完成 BaM自己的部署与正确性验证，再加trace。
+
+控制器路径也不是通过 `-f` 指定的：固定上游 BFS 的 `main.cu` 中有
+`sam_ctrls_paths` / `intel_ctrls_paths`，单控制器时两数组第0项均为 `/dev/libnvm0`；
+`--ssd 0/1` 选择对应路径数组，不会按 SSD型号自动发现设备。
+部署程序与BFS必须指向同一控制器/namespace，并确认已有控制器映射。
+如需修改路径数组，应在 BaM checkout 中完成并重新编译；不需要改 KvikIO数据路径。
+
 ## 4. 采集真实 BFS
 
 BaM 输入使用 `<graph>.bel.col` 和 `<graph>.bel.dst`。
 `.col` 为 vertex offsets，`.dst` 包含 16 B header + uint64 edges。
 采集前确保 NVMe 上 `--loffset` 指向同一 `.dst` 的**去掉 header 的 edge payload**；
-BaM readwrite 部署时的 input offset 应为 16 B。禁止使用包含 header 的 raw layout。
+用原始 .dst 作为 BaM readwrite输入时，input offset应为16 B；用去header后的payload时为0。
+禁止使用包含 header 的 raw layout。
 该布局必须与原来可正确运行的 BaM BFS一致。
 
 ```bash
-cd /path/to/bam-bfs-trace
-mkdir -p results/bfs_path_opportunity/run_01
+cd "$BAM_BFS_ROOT"
+mkdir -p "$BFS_CAPTURE_DIR"
 sudo env \
-  BFS_TRACE_PREFIX="$PWD/results/bfs_path_opportunity/run_01/bfs" \
+  BFS_TRACE_PREFIX="$BFS_TRACE_PREFIX" \
   BFS_TRACE_EVENTS=4194304 \
   ./build/bin/nvm-bfs-bench \
-  -f /path/to/graph.bel --loffset 0 \
-  --impl_type 9 --memalloc 6 --src 12345 \
-  --n_ctrls 1 --page_size 4096 --gpu 0 --threads 128 \
-  --maxPCSize 4194304 \
-  > results/bfs_path_opportunity/run_01/bfs.log 2>&1
+  -f "$GRAPH_PREFIX" --loffset "$BFS_RAW_OFFSET" \
+  --impl_type 9 --memalloc 6 --src "$BFS_SOURCE" \
+  --n_ctrls 1 --page_size "$BFS_PAGE_BYTES" --gpu "$BFS_GPU" --threads 128 \
+  --maxPCSize "$((BFS_GPU_CACHE_PAGES * BFS_PAGE_BYTES))" \
+  > "$BFS_CAPTURE_DIR/bfs.log" 2>&1
 ```
 
 将 src 换成有效且能遍历较多顶点的根。**上游代码中 src != 0 时 total_run 固定为 2，
@@ -124,12 +288,12 @@ GPU cache 在采集中为 4 MiB（1024 个 4 KiB 页），便于与下面 replay
 ```bash
 cd "$KVIKIO_BFS_ROOT"
 python3 benchmarks/bfs_trace/prepare_edges.py \
-  /path/to/graph.bel.dst /mnt/gds/bfs_edges_4k.bin --page-bytes 4096
+  "$GRAPH_DST" "$BFS_EDGE_FILE" --page-bytes "$BFS_PAGE_BYTES"
 ```
 
 该程序去掉两个 uint64 header，只复制 `edge_count*8` B payload，并在末尾补零到 page 边界；
 输出存在时拒绝覆盖。BaM不解释 header 的 typeT字段，本工具也不猜测其枚举含义。
-源数据必须确实为 uint64 edge IDs。`page_id=p` 对应新文件偏移 `p*4096`，不使用裸设备 loffset。
+源数据必须确实为 uint64 edge IDs。`page_id=p` 对应新文件偏移 `p*BFS_PAGE_BYTES`（默认 p*4096），不使用裸设备 loffset。
 只做读；没有 trace 的页不影响 replay。
 
 ## 6. 禁止 GDS 静默退回 Host
@@ -138,13 +302,14 @@ python3 benchmarks/bfs_trace/prepare_edges.py \
 基于当前节点的 cufile.json 复制一份实验配置，保留其文件系统、设备及其它设置，仅关闭兼容回退：
 
 ```bash
-mkdir -p results/bfs_path_opportunity/config
+mkdir -p "$BFS_RESULT_ROOT/config"
 python3 - <<'PY'
 import json
+import os
 from pathlib import Path
 cfg = json.loads(Path('/etc/cufile.json').read_text())
 cfg.setdefault('properties', {})['allow_compat_mode'] = False
-Path('results/bfs_path_opportunity/config/cufile_direct.json').write_text(json.dumps(cfg, indent=2))
+Path(os.environ['BFS_DIRECT_CONFIG']).write_text(json.dumps(cfg, indent=2))
 PY
 ```
 
@@ -157,23 +322,28 @@ Replay 的 GDS 模式要求提供该配置，强制 KvikIO compat_mode=False，�
 
 ## 7. 校验读取内容，再做性能 replay
 
-把 trace 三个文件复制到 KvikIO 下的 `results/bfs_path_opportunity/trace/`，目录命名按实验目的，不用时间戳。
+如果采集和 replay 在同一节点，上面 BFS_PAGES / BFS_LEVELS可直接指向采集输出，无需复制。
+如果换节点，完整复制pages.csv、levels.csv和同名前缀的complete标记，然后重新设置这三个路径；
+两种replay使用同一次run，不能分别重新采集。目录命名按实验目的，不用时间戳。
 
 ```bash
 cd "$KVIKIO_BFS_ROOT"
-export BFS_PAGES="$PWD/results/bfs_path_opportunity/trace/bfs_run_0_pages.csv"
-export BFS_LEVELS="$PWD/results/bfs_path_opportunity/trace/bfs_run_0_levels.csv"
-export BFS_DIRECT_CONFIG="$PWD/results/bfs_path_opportunity/config/cufile_direct.json"
+test -s "$BFS_PAGES"
+test -s "$BFS_LEVELS"
+test -f "$BFS_COMPLETE"
+test -s "$BFS_EDGE_FILE"
+test -s "$BFS_DIRECT_CONFIG"
+mkdir -p "$BFS_RESULT_ROOT/correctness/run_01"
 
 python3 benchmarks/bfs_trace/replay.py \
-  --pages "$BFS_PAGES" --levels "$BFS_LEVELS" --edge-file /mnt/gds/bfs_edges_4k.bin \
-  --mode host-cached --gpu-cache-pages 1024 --qd trace --max-qd 64 --verify \
-  --output results/bfs_path_opportunity/correctness/host.csv
+  --pages "$BFS_PAGES" --levels "$BFS_LEVELS" --edge-file "$BFS_EDGE_FILE" \
+  --mode host-cached --gpu "$BFS_GPU" --gpu-cache-pages "$BFS_GPU_CACHE_PAGES" --qd trace --max-qd 64 --verify \
+  --output "$BFS_RESULT_ROOT/correctness/run_01/host.csv"
 python3 benchmarks/bfs_trace/replay.py \
-  --pages "$BFS_PAGES" --levels "$BFS_LEVELS" --edge-file /mnt/gds/bfs_edges_4k.bin \
+  --pages "$BFS_PAGES" --levels "$BFS_LEVELS" --edge-file "$BFS_EDGE_FILE" \
   --mode gds --cufile-config "$BFS_DIRECT_CONFIG" \
-  --gpu-cache-pages 1024 --qd trace --max-qd 64 --verify \
-  --output results/bfs_path_opportunity/correctness/gds.csv
+  --gpu "$BFS_GPU" --gpu-cache-pages "$BFS_GPU_CACHE_PAGES" --qd trace --max-qd 64 --verify \
+  --output "$BFS_RESULT_ROOT/correctness/run_01/gds.csv"
 ```
 
 `--verify` 对每个 cache miss 逐字节比较 GPU 内容与文件。这会预热 Linux page cache、增加同步，
@@ -183,18 +353,18 @@ python3 benchmarks/bfs_trace/replay.py \
 
 ```bash
 python3 benchmarks/bfs_trace/replay.py \
-  --pages "$BFS_PAGES" --levels "$BFS_LEVELS" --edge-file /mnt/gds/bfs_edges_4k.bin \
-  --mode host-cached --gpu-cache-pages 1024 --qd trace --max-qd 64 \
-  --output results/bfs_path_opportunity/run_01/host.csv
+  --pages "$BFS_PAGES" --levels "$BFS_LEVELS" --edge-file "$BFS_EDGE_FILE" \
+  --mode host-cached --gpu "$BFS_GPU" --gpu-cache-pages "$BFS_GPU_CACHE_PAGES" --qd trace --max-qd 64 \
+  --output "$BFS_REPLAY_DIR/host.csv"
 python3 benchmarks/bfs_trace/replay.py \
-  --pages "$BFS_PAGES" --levels "$BFS_LEVELS" --edge-file /mnt/gds/bfs_edges_4k.bin \
+  --pages "$BFS_PAGES" --levels "$BFS_LEVELS" --edge-file "$BFS_EDGE_FILE" \
   --mode gds --cufile-config "$BFS_DIRECT_CONFIG" \
-  --gpu-cache-pages 1024 --qd trace --max-qd 64 \
-  --output results/bfs_path_opportunity/run_01/gds.csv
+  --gpu "$BFS_GPU" --gpu-cache-pages "$BFS_GPU_CACHE_PAGES" --qd trace --max-qd 64 \
+  --output "$BFS_REPLAY_DIR/gds.csv"
 python3 benchmarks/bfs_trace/compare.py \
-  results/bfs_path_opportunity/run_01/host.csv \
-  results/bfs_path_opportunity/run_01/gds.csv \
-  --output results/bfs_path_opportunity/run_01/comparison.csv
+  "$BFS_REPLAY_DIR/host.csv" \
+  "$BFS_REPLAY_DIR/gds.csv" \
+  --output "$BFS_REPLAY_DIR/comparison.csv"
 ```
 
 Host Cached 的实现为 **buffered preadv → pinned Host buffer → GPU**，复用来自 Linux page cache，
@@ -218,6 +388,36 @@ Host Cached 的实现为 **buffered preadv → pinned Host buffer → GPU**，�
 上述性能命令若紧接 correctness 执行且未控制初态，属于 warm/未知状态，不能标为 cold。
 不同顺序交替（Host/GDS 与 GDS/Host），每种条件至少 5 个独立进程，run_01…run_05，
 记录page cache协议、显存/Host容量、SSD和拓扑。compare 检查trace校验和、QD、缓存容量和逐层miss数一致。
+
+## 7.1 下一轮实验和常见路径错误
+
+更换run编号时，明确区分重采trace和重复replay：
+
+```bash
+# 仅重复 replay：仍使用原 BFS_PAGES / BFS_LEVELS / BFS_COMPLETE。
+export BFS_REPLAY_DIR="$BFS_RESULT_ROOT/replay/run_02"
+mkdir -p "$BFS_REPLAY_DIR"
+# 重跑第7节两条性能命令与compare命令。
+```
+
+若要更换图或源节点重新采集，先修改GRAPH_PREFIX/GRAPH_COL/GRAPH_DST或BFS_SOURCE，
+再改BFS_CAPTURE_DIR/BFS_TRACE_PREFIX及三项trace输入变量，重复数据检查与采集。
+更换图还需要准备对应BFS_EDGE_FILE并重新验证BaM裸设备布局；不能用新trace读取旧图payload。
+同一图仅换源节点时不必重新准备edge文件。
+
+| 现象 | 优先检查 |
+|---|---|
+| Vertex/Edge file open failed | `-f` 是否为前缀；`${GRAPH_PREFIX}.col` / `.dst` 是否存在 |
+| `/dev/libnvm0` 打不开 | BaM控制器/驱动映射，非GRAPH_PREFIX路径问题 |
+| BFS输出异常、访问非法顶点 | 裸设备是否写了同图payload、是否跳过16 B header、loffset是否正确；也需检查原始图 |
+| 找不到complete标记 | BFS是否正常完成；发生overflow时整次重采，不要手动创建标记 |
+| replay提示edge file too short | `--edge-file` 是否为正确图的去header且按本次page size补齐的文件 |
+| replay存在output already exists | 换下一轮结果目录；工具不会覆盖已有replay结果 |
+| GDS报错但Host可运行 | direct配置、文件系统、GPU/SSD拓扑与GDS支持；不要改为AUTO后标为原生GDS |
+| compare提示unpaired replay | 两条路径是否共用相同trace、edge文件、QD和GPU cache容量 |
+
+`BFS_COMPLETE` 是核对用变量；replay程序根据 `*_pages.csv` 的文件名前缀自行定位 `*_complete`，
+没有单独的 `--complete` 参数。复制或重命名时必须保持三件套的统一前缀。
 
 ## 8. 判断 BFS 是否值得继续
 
