@@ -12,6 +12,7 @@ two uint64 header words.  The emitted trace contains aligned file offsets into
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 from dataclasses import dataclass
@@ -46,10 +47,11 @@ def open_bam_array(path: Path) -> BamArray:
 
 
 class TraceWriter:
-    def __init__(self, path: Path, max_requests: int | None = None):
+    def __init__(self, path: Path, max_requests: int | None = None, *, write_trace: bool = True):
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self._file = path.open("wb")
+        self.write_trace = write_trace
+        self._file = path.open("wb") if write_trace else None
         self.max_requests = max_requests
         self.count = 0
         self.digest = hashlib.sha256()
@@ -63,15 +65,38 @@ class TraceWriter:
         if self.max_requests is not None:
             values = values[: max(0, self.max_requests - self.count)]
         payload = values.tobytes(order="C")
-        self._file.write(payload)
-        self.digest.update(payload)
+        if self.write_trace:
+            assert self._file is not None
+            self._file.write(payload)
+            self.digest.update(payload)
         self.count += values.size
         return int(values.size)
 
     def close(self) -> None:
-        self._file.close()
+        if self._file is not None:
+            self._file.close()
 
 
+def write_level_summary(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fields = [
+        "level",
+        "frontier_size",
+        "active_vertices",
+        "edge_accesses",
+        "logical_bytes",
+        "page_refs",
+        "trace_requests",
+        "unique_pages",
+        "repeated_page_refs",
+        "intra_level_reuse_ratio",
+        "inter_level_reused_pages",
+        "inter_level_reuse_ratio",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as output:
+        writer = csv.DictWriter(output, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
 def _expand_ranges(starts: np.ndarray, ends: np.ndarray) -> np.ndarray:
     """Expand half-open integer ranges without a Python loop."""
     starts = np.asarray(starts, dtype=np.int64)
@@ -120,20 +145,35 @@ def generate_bfs(
     visited[source] = True
     frontier = np.asarray([source], dtype=np.int64)
     level_requests: list[int] = []
+    level_summary: list[dict] = []
+    seen_pages: set[int] = set()
     visited_count = 1
 
-    for _level in range(max_levels):
+    for level in range(max_levels):
         if frontier.size == 0 or writer.full:
             break
         requests_before = writer.count
+        frontier_size = int(frontier.size)
+        active_vertices = 0
+        edge_accesses = 0
+        page_refs = 0
+        level_pages: set[int] = set()
         next_parts: list[np.ndarray] = []
+
         for begin in range(0, frontier.size, frontier_chunk):
             vertices = frontier[begin : begin + frontier_chunk]
             starts = np.asarray(col[vertices], dtype=np.int64)
             ends = np.asarray(col[vertices + 1], dtype=np.int64)
-            writer.append(_page_offsets(starts, ends, page_size))
+            nonempty = ends > starts
+            active_vertices += int(np.count_nonzero(nonempty))
+            edge_accesses += int(np.maximum(ends - starts, 0).sum())
 
-            # The traversal itself is offline trace extraction.  Expanding the
+            page_offsets = _page_offsets(starts, ends, page_size)
+            page_refs += int(page_offsets.size)
+            level_pages.update(int(page) for page in np.unique(page_offsets // page_size))
+            writer.append(page_offsets)
+
+            # The traversal itself is offline trace extraction. Expanding the
             # exact CSR ranges preserves the same frontier dependence as BFS.
             edge_ids = _expand_ranges(starts, ends)
             if edge_ids.size:
@@ -147,7 +187,33 @@ def generate_bfs(
                         next_parts.append(unseen)
             if writer.full:
                 break
-        level_requests.append(writer.count - requests_before)
+
+        trace_requests = writer.count - requests_before
+        level_requests.append(trace_requests)
+        unique_pages = len(level_pages)
+        reused_pages = sum(1 for page in level_pages if page in seen_pages)
+        repeated_page_refs = max(0, page_refs - unique_pages)
+        level_summary.append(
+            {
+                "level": level,
+                "frontier_size": frontier_size,
+                "active_vertices": active_vertices,
+                "edge_accesses": edge_accesses,
+                "logical_bytes": edge_accesses * 8,
+                "page_refs": page_refs,
+                "trace_requests": trace_requests,
+                "unique_pages": unique_pages,
+                "repeated_page_refs": repeated_page_refs,
+                "intra_level_reuse_ratio": (
+                    1.0 - unique_pages / page_refs if page_refs else 0.0
+                ),
+                "inter_level_reused_pages": reused_pages,
+                "inter_level_reuse_ratio": (
+                    reused_pages / unique_pages if unique_pages else 0.0
+                ),
+            }
+        )
+        seen_pages.update(level_pages)
         frontier = (
             np.unique(np.concatenate(next_parts))
             if next_parts
@@ -157,11 +223,10 @@ def generate_bfs(
     return {
         "levels": len(level_requests),
         "level_requests": level_requests,
+        "level_summary": level_summary,
         "visited_vertices": visited_count,
         "vertex_count": vertex_count,
     }
-
-
 def generate_pagerank(
     col: np.ndarray,
     dst: np.ndarray,
@@ -232,7 +297,7 @@ def generate_pagerank(
 def generate(args: argparse.Namespace) -> dict:
     col_file = open_bam_array(Path(str(args.graph) + ".col"))
     dst_file = open_bam_array(Path(str(args.graph) + ".dst"))
-    writer = TraceWriter(args.output, args.max_requests)
+    writer = TraceWriter(args.output, args.max_requests, write_trace=not args.summary_only)
     try:
         if args.algorithm == "bfs":
             algorithm = generate_bfs(
@@ -258,6 +323,11 @@ def generate(args: argparse.Namespace) -> dict:
     finally:
         writer.close()
 
+    summary_path = None
+    if args.algorithm == "bfs":
+        summary_path = args.summary_csv or args.output.with_suffix(".levels.csv")
+        write_level_summary(summary_path, algorithm["level_summary"])
+
     metadata = {
         "format": "groute-graph-trace-v1",
         "algorithm": args.algorithm,
@@ -266,20 +336,23 @@ def generate(args: argparse.Namespace) -> dict:
         "page_size": args.page_size,
         "request_count": writer.count,
         "nominal_logical_bytes": writer.count * args.page_size,
-        "trace_sha256": writer.digest.hexdigest(),
+        "trace_sha256": writer.digest.hexdigest() if writer.write_trace else None,
+        "trace_file": str(args.output) if writer.write_trace else None,
+        "summary_only": args.summary_only,
+        "level_summary_csv": str(summary_path) if summary_path is not None else None,
         "truncated": writer.full,
         **algorithm,
     }
     metadata_path = args.output.with_suffix(args.output.suffix + ".json")
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     return metadata
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--algorithm", choices=("bfs", "pagerank"), required=True)
     parser.add_argument("--graph", type=Path, required=True, help="BaM graph prefix")
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True, help="trace path (not created with --summary-only)")
+    parser.add_argument("--summary-csv", type=Path, help="BFS level summary CSV; defaults to OUTPUT with .levels.csv suffix")
+    parser.add_argument("--summary-only", action="store_true", help="analyze BFS levels without writing the page trace")
     parser.add_argument("--page-size", type=int, default=4096)
     parser.add_argument("--source", type=int, default=0)
     parser.add_argument("--max-levels", type=int, default=100)
