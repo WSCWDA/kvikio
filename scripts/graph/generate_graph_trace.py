@@ -357,7 +357,10 @@ def generate_pagerank(
 def generate(args: argparse.Namespace) -> dict:
     col_file = open_bam_array(Path(str(args.graph) + ".col"))
     dst_file = open_bam_array(Path(str(args.graph) + ".dst"))
-    writer = TraceWriter(args.output, args.max_requests, write_trace=not args.summary_only)
+    output_path = args.output or args.summary_csv
+    if output_path is None:
+        raise ValueError("--summary-only requires --summary-csv when --output is omitted")
+    writer = TraceWriter(output_path, args.max_requests, write_trace=not args.summary_only)
     try:
         if args.algorithm == "bfs":
             algorithm = generate_bfs(
@@ -386,7 +389,7 @@ def generate(args: argparse.Namespace) -> dict:
     summary_path = None
     phase_assessment = None
     if args.algorithm == "bfs":
-        summary_path = args.summary_csv or args.output.with_suffix(".levels.csv")
+        summary_path = args.summary_csv or output_path.with_suffix(".levels.csv")
         write_level_summary(summary_path, algorithm["level_summary"])
         phase_assessment = assess_bfs_phase(
             algorithm["level_summary"],
@@ -411,14 +414,15 @@ def generate(args: argparse.Namespace) -> dict:
         "truncated": writer.full,
         **algorithm,
     }
-    metadata_path = args.output.with_suffix(args.output.suffix + ".json")
+    metadata_base = summary_path if args.summary_only and summary_path is not None else output_path
+    metadata_path = metadata_base.with_suffix(metadata_base.suffix + ".json")
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     return metadata
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--algorithm", choices=("bfs", "pagerank"), required=True)
     parser.add_argument("--graph", type=Path, required=True, help="BaM graph prefix")
-    parser.add_argument("--output", type=Path, required=True, help="trace path (not created with --summary-only)")
+    parser.add_argument("--output", type=Path, help="binary trace path; optional in --summary-only mode")
     parser.add_argument("--summary-csv", type=Path, help="BFS level summary CSV; defaults to OUTPUT with .levels.csv suffix")
     parser.add_argument("--summary-only", action="store_true", help="analyze BFS levels without writing the page trace")
     parser.add_argument("--min-frontier-ratio", type=float, default=10.0, help="frontier max/min ratio required by the screening gate")
@@ -451,6 +455,10 @@ def main() -> None:
         parser.error("--min-reuse-span must be in [0, 1]")
     if args.summary_csv is not None and args.algorithm != "bfs":
         parser.error("--summary-csv is only supported for BFS")
+    if not args.summary_only and args.output is None:
+        parser.error("--output is required unless --summary-only is used")
+    if args.summary_only and args.output is None and args.summary_csv is None:
+        parser.error("--summary-only requires --summary-csv when --output is omitted")
     if not 0.0 < args.alpha < 1.0:
         parser.error("--alpha must be in (0, 1)")
     if args.tolerance <= 0.0:
