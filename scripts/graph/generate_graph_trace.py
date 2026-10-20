@@ -77,6 +77,66 @@ class TraceWriter:
             self._file.close()
 
 
+def _positive_ratio(values: list[int]) -> float:
+    positive = [value for value in values if value > 0]
+    return max(positive) / min(positive) if positive else 0.0
+
+
+def assess_bfs_phase(
+    rows: list[dict],
+    *,
+    min_frontier_ratio: float,
+    min_demand_ratio: float,
+    min_reuse_span: float,
+) -> dict:
+    """Apply explicit screening gates; passing motivates replay, not a path claim."""
+    frontier_ratio = _positive_ratio([int(row["frontier_size"]) for row in rows])
+    page_refs_ratio = _positive_ratio([int(row["page_refs"]) for row in rows])
+    unique_pages_ratio = _positive_ratio([int(row["unique_pages"]) for row in rows])
+    demand_ratio = max(page_refs_ratio, unique_pages_ratio)
+    reuse_values = [float(row["inter_level_reuse_ratio"]) for row in rows]
+    reuse_min = min(reuse_values, default=0.0)
+    reuse_max = max(reuse_values, default=0.0)
+    reuse_span = reuse_max - reuse_min
+
+    gates = {
+        "frontier_phase_change": {
+            "passed": frontier_ratio >= min_frontier_ratio,
+            "observed_ratio": frontier_ratio,
+            "required_ratio": min_frontier_ratio,
+        },
+        "io_demand_change": {
+            "passed": demand_ratio >= min_demand_ratio,
+            "observed_max_ratio": demand_ratio,
+            "page_refs_ratio": page_refs_ratio,
+            "unique_pages_ratio": unique_pages_ratio,
+            "required_ratio": min_demand_ratio,
+        },
+        "inter_level_reuse_change": {
+            "passed": reuse_span >= min_reuse_span and reuse_min < 0.95 and reuse_max > 0.05,
+            "observed_min": reuse_min,
+            "observed_max": reuse_max,
+            "observed_span": reuse_span,
+            "required_span": min_reuse_span,
+        },
+    }
+    passed = all(gate["passed"] for gate in gates.values())
+    return {
+        "levels_observed": len(rows),
+        "gates": gates,
+        "summary_gates_passed": passed,
+        "interpretation": (
+            "candidate_for_host_gds_replay"
+            if passed
+            else "summary_gates_not_met"
+        ),
+        "caveat": (
+            "Passing these summary gates does not establish a Host/GDS crossover; "
+            "compare both paths on the same per-level request trace."
+        ),
+    }
+
+
 def write_level_summary(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fields = [
@@ -324,9 +384,16 @@ def generate(args: argparse.Namespace) -> dict:
         writer.close()
 
     summary_path = None
+    phase_assessment = None
     if args.algorithm == "bfs":
         summary_path = args.summary_csv or args.output.with_suffix(".levels.csv")
         write_level_summary(summary_path, algorithm["level_summary"])
+        phase_assessment = assess_bfs_phase(
+            algorithm["level_summary"],
+            min_frontier_ratio=args.min_frontier_ratio,
+            min_demand_ratio=args.min_demand_ratio,
+            min_reuse_span=args.min_reuse_span,
+        )
 
     metadata = {
         "format": "groute-graph-trace-v1",
@@ -340,6 +407,7 @@ def generate(args: argparse.Namespace) -> dict:
         "trace_file": str(args.output) if writer.write_trace else None,
         "summary_only": args.summary_only,
         "level_summary_csv": str(summary_path) if summary_path is not None else None,
+        "phase_assessment": phase_assessment,
         "truncated": writer.full,
         **algorithm,
     }
@@ -353,6 +421,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, required=True, help="trace path (not created with --summary-only)")
     parser.add_argument("--summary-csv", type=Path, help="BFS level summary CSV; defaults to OUTPUT with .levels.csv suffix")
     parser.add_argument("--summary-only", action="store_true", help="analyze BFS levels without writing the page trace")
+    parser.add_argument("--min-frontier-ratio", type=float, default=10.0, help="frontier max/min ratio required by the screening gate")
+    parser.add_argument("--min-demand-ratio", type=float, default=2.0, help="page_refs or unique_pages max/min ratio required by the screening gate")
+    parser.add_argument("--min-reuse-span", type=float, default=0.10, help="inter-level reuse range required by the screening gate")
     parser.add_argument("--page-size", type=int, default=4096)
     parser.add_argument("--source", type=int, default=0)
     parser.add_argument("--max-levels", type=int, default=100)
@@ -374,6 +445,12 @@ def main() -> None:
         parser.error("--page-size must be a power of two")
     if args.max_requests is not None and args.max_requests <= 0:
         parser.error("--max-requests must be positive")
+    if args.min_frontier_ratio < 1.0 or args.min_demand_ratio < 1.0:
+        parser.error("phase variation ratios must be at least 1")
+    if not 0.0 <= args.min_reuse_span <= 1.0:
+        parser.error("--min-reuse-span must be in [0, 1]")
+    if args.summary_csv is not None and args.algorithm != "bfs":
+        parser.error("--summary-csv is only supported for BFS")
     if not 0.0 < args.alpha < 1.0:
         parser.error("--alpha must be in (0, 1)")
     if args.tolerance <= 0.0:
