@@ -1,47 +1,40 @@
 # SPDX-FileCopyrightText: Copyright (c) 2021-2026, NVIDIA CORPORATION. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Controlled benchmark for G-Route path-selection evaluation.
+"""Controlled context benchmark for G-Route.
 
-This benchmark is derived from ``single_node_io.py`` but decouples request size
-from concurrency and adds controlled reuse/working-set generation. It is aimed
-at evaluating the near-oracle routing claim under representative I/O contexts.
+The benchmark is derived from ``single_node_io.py`` but is designed for the
+near-oracle routing evaluation. It keeps request size independent of logical
+concurrency and generates deterministic low/high-reuse request streams.
 
-Example:
+Example
+-------
 
     python -m kvikio.benchmarks.groute_context_bench \
-      -d /mnt/gds/groute-context \
+      -d /mnt/gds \
       --request-size "512 KiB" \
       --concurrency 1 16 64 \
-      --reuse low high \
+      --reuse low \
       --policy host_cache gds_direct threshold auto \
       --working-set "8 GiB" \
-      --requests-per-run 512 \
-      --nruns 5 \
-      --csv /mnt/gds/results/groute-context/results.csv
+      --requests-per-run 128 \
+      --nruns 1 \
+      --csv /mnt/gds/results/groute-context/smoke.csv
 
-Notes
------
-* Reads are 4-KiB aligned.
-* Request size and concurrency are independent variables.
-* ``low`` reuse generates non-repeating offsets within a run whenever the
-  working set is large enough.
-* ``high`` reuse repeatedly draws from a configurable hot set. A warm-up pass
-  is executed before timed high-reuse runs so the host-cache path can exploit
-  reuse naturally.
-* The benchmark does not drop Linux caches itself. For cold-cache experiments,
-  drop caches externally before each process invocation, e.g.::
+For cold-cache experiments, drop Linux caches *outside* the benchmark process:
 
-      sync; echo 3 > /proc/sys/vm/drop_caches
+    sync; echo 3 > /proc/sys/vm/drop_caches
 
-  This keeps cache-control policy explicit and avoids timing perturbation from
-  in-process cache flushing.
+The benchmark forces KvikIO compatibility mode OFF by default so that a forced
+GDS policy actually exercises libcufile. Use ``--compat-mode auto`` only when
+that behavior is explicitly desired.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import os
 import pathlib
 import random
 import statistics
@@ -59,6 +52,22 @@ from kvikio.benchmarks.utils import parse_directory, pprint_sys_info
 ALIGNMENT = 4096
 POLICIES = ("host_cache", "gds_direct", "threshold", "auto")
 REUSE_MODES = ("low", "high")
+
+# Cython enum setters currently require integer/enum values, not strings.
+# Keep these values synchronized with cpp/include/kvikio/defaults.hpp and
+# python/kvikio/kvikio/_lib/defaults.pyx.
+POLICY_MODE = {
+    "auto": 0,
+    "host_direct": 1,
+    "host_cache": 2,
+    "gds_direct": 3,
+    "gds_shaped": 4,
+}
+COMPAT_MODE = {
+    "off": 0,
+    "on": 1,
+    "auto": 2,
+}
 
 
 @dataclass(frozen=True)
@@ -82,10 +91,6 @@ class RunResult:
     offset_reuse_ratio: float
 
 
-def _align_down(value: int, alignment: int = ALIGNMENT) -> int:
-    return value - value % alignment
-
-
 def _validate_args(args) -> None:
     if args.request_size % ALIGNMENT != 0:
         raise ValueError("--request-size must be 4-KiB aligned")
@@ -99,23 +104,54 @@ def _validate_args(args) -> None:
         raise ValueError("--nruns must be >= 1")
     if args.hotset_requests < 1:
         raise ValueError("--hotset-requests must be >= 1")
+    if args.thread_pool_threads < 1:
+        raise ValueError("--thread-pool-threads must be >= 1")
     for c in args.concurrency:
         if c < 1:
             raise ValueError("all --concurrency values must be >= 1")
 
 
-def _ensure_file(path: pathlib.Path, nbytes: int) -> None:
-    """Create or resize a backing file without including setup in timed runs."""
+def _file_is_sparse(path: pathlib.Path, nbytes: int) -> bool:
+    st = path.stat()
+    allocated = getattr(st, "st_blocks", 0) * 512
+    return st.st_size != nbytes or allocated < nbytes
+
+
+def _write_dense_file(path: pathlib.Path, nbytes: int) -> None:
+    """Create a physically backed file rather than a sparse/truncated file.
+
+    A sparse file is invalid for a storage benchmark because reads from holes
+    can be satisfied as zeros by the filesystem without real NVMe data reads.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and path.stat().st_size == nbytes:
+    chunk_size = min(64 * 1024 * 1024, nbytes)
+    pattern = bytes([0xA5]) * chunk_size
+    written = 0
+    print(f"Preparing dense backing file: {path} ({format_bytes(nbytes)})")
+    with open(path, "wb", buffering=0) as f:
+        while written < nbytes:
+            n = min(chunk_size, nbytes - written)
+            f.write(pattern[:n])
+            written += n
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _ensure_file(path: pathlib.Path, nbytes: int, force_prepare: bool) -> None:
+    if force_prepare or not path.exists() or _file_is_sparse(path, nbytes):
+        _write_dense_file(path, nbytes)
         return
-    with open(path, "wb") as f:
-        f.truncate(nbytes)
+    print(f"Using existing dense backing file: {path}")
 
 
-def _all_valid_offsets(working_set: int, request_size: int) -> range:
-    last = working_set - request_size
-    return range(0, last + 1, ALIGNMENT)
+def _valid_request_offsets(working_set: int, request_size: int) -> list[int]:
+    """Return non-overlapping request-sized slots.
+
+    Using request-sized slots prevents two distinct 'low reuse' logical
+    requests from accidentally sharing pages merely because their starts are
+    only 4-KiB apart.
+    """
+    return list(range(0, working_set - request_size + 1, request_size))
 
 
 def _generate_offsets(
@@ -128,24 +164,20 @@ def _generate_offsets(
     seed: int,
 ) -> list[int]:
     rng = random.Random(seed)
-    valid = _all_valid_offsets(working_set, request_size)
-    nslots = len(valid)
-    if nslots == 0:
+    valid = _valid_request_offsets(working_set, request_size)
+    if not valid:
         return [0] * requests_per_run
 
     if reuse == "low":
-        # Prefer non-repeating offsets. If the run contains more requests than
-        # available aligned slots, shuffle cycles rather than introducing a
-        # strong hot set.
         offsets: list[int] = []
         while len(offsets) < requests_per_run:
-            cycle = list(valid)
+            cycle = valid.copy()
             rng.shuffle(cycle)
             offsets.extend(cycle[: requests_per_run - len(offsets)])
         return offsets
 
-    hot_count = min(hotset_requests, nslots)
-    hot = rng.sample(list(valid), hot_count)
+    hot_count = min(hotset_requests, len(valid))
+    hot = rng.sample(valid, hot_count)
     return [rng.choice(hot) for _ in range(requests_per_run)]
 
 
@@ -155,27 +187,47 @@ def _reuse_ratio(offsets: list[int]) -> float:
     return 1.0 - len(set(offsets)) / len(offsets)
 
 
-def _policy_config(policy: str, threshold: int) -> dict:
-    """Return KvikIO settings for one benchmark policy.
+def _policy_config(policy: str, threshold: int, compat_mode: str) -> dict:
+    """Build KvikIO settings for a benchmark policy.
 
-    ``threshold`` intentionally disables G-Route and restores native KvikIO
-    size-threshold dispatch. Forced policies keep G-Route enabled because
-    PolicyMode is implemented by the G-Route path selector.
+    ``threshold`` disables G-Route and restores native KvikIO threshold
+    dispatch. Forced Host/GDS policies enable G-Route and set PolicyMode.
     """
     common = {
+        "compat_mode": COMPAT_MODE[compat_mode],
         "request_shaping_enabled": False,
     }
+
     if policy == "threshold":
         return {
             **common,
             "groute_enabled": False,
             "gds_threshold": threshold,
         }
+
     return {
         **common,
         "groute_enabled": True,
-        "policy_mode": policy,
+        "policy_mode": POLICY_MODE[policy],
     }
+
+
+def _execute_batches(f, buffers, offsets, request_size, concurrency) -> int:
+    total = 0
+    for base in range(0, len(offsets), concurrency):
+        batch = offsets[base : base + concurrency]
+        futures = [
+            f.pread(
+                buffers[i],
+                size=request_size,
+                file_offset=off,
+                task_size=request_size,
+            )
+            for i, off in enumerate(batch)
+        ]
+        total += sum(fut.get() for fut in futures)
+    cupy.cuda.get_current_stream().synchronize()
+    return total
 
 
 def _run_read_batches(
@@ -184,54 +236,35 @@ def _run_read_batches(
     request_size: int,
     concurrency: int,
     pre_register_buffer: bool,
+    warmup: bool,
 ) -> tuple[float, int]:
-    """Execute fixed-size reads with at most ``concurrency`` in flight."""
+    """Execute reads while preserving per-FileHandle cache state.
+
+    For high-reuse runs, the untimed warm-up and timed pass intentionally use
+    the same CuFile handle. G-Route host-cache state is FileHandle-local, so
+    reopening the file between warm-up and measurement would discard the state
+    that the experiment is intended to measure.
+    """
     buffers = [cupy.empty(request_size, dtype="uint8") for _ in range(concurrency)]
     if pre_register_buffer:
         for buf in buffers:
             kvikio.buffer.memory_register(buf)
 
-    total = 0
     f = kvikio.CuFile(file_path, flags="r")
     try:
+        if warmup:
+            _execute_batches(f, buffers, offsets, request_size, concurrency)
+
         t0 = clock()
-        for base in range(0, len(offsets), concurrency):
-            batch = offsets[base : base + concurrency]
-            futures = [
-                f.pread(
-                    buffers[i],
-                    size=request_size,
-                    file_offset=off,
-                    task_size=request_size,
-                )
-                for i, off in enumerate(batch)
-            ]
-            total += sum(fut.get() for fut in futures)
-        cupy.cuda.get_current_stream().synchronize()
+        total = _execute_batches(f, buffers, offsets, request_size, concurrency)
         elapsed = clock() - t0
     finally:
         f.close()
         if pre_register_buffer:
             for buf in buffers:
                 kvikio.buffer.memory_deregister(buf)
+
     return elapsed, total
-
-
-def _warm_reuse_set(args, file_path: pathlib.Path, offsets: list[int], policy: str) -> None:
-    if not args.warm_high_reuse:
-        return
-    # Warm with the same policy so the state being measured is the state that
-    # policy naturally creates. The warm-up is deliberately untimed.
-    config = _policy_config(policy, args.gds_threshold)
-    config["num_threads"] = args.thread_pool_threads
-    with kvikio.defaults.set(config):
-        _run_read_batches(
-            file_path,
-            offsets,
-            args.request_size,
-            max(1, min(args.warmup_concurrency, max(args.concurrency))),
-            args.pre_register_buffer,
-        )
 
 
 def _write_csv(path: pathlib.Path, rows: list[RunResult]) -> None:
@@ -281,11 +314,10 @@ def _print_summary(rows: list[RunResult]) -> None:
     print("=======")
     for (policy, req, conc, reuse), samples in grouped.items():
         mean = statistics.mean(samples)
+        spread = ""
         if len(samples) > 1:
             std_pct = statistics.stdev(samples) / mean * 100 if mean else 0.0
             spread = f" +/- {std_pct:.2f}%"
-        else:
-            spread = ""
         print(
             f"{policy:12s} req={format_bytes(req):>9s} "
             f"C={conc:>3d} reuse={reuse:>4s}  "
@@ -299,7 +331,7 @@ def main(args) -> None:
     cupy.arange(10)
 
     file_path = args.dir / args.file_name
-    _ensure_file(file_path, args.working_set)
+    _ensure_file(file_path, args.working_set, args.prepare_file)
 
     print("G-Route controlled context benchmark")
     print("------------------------------------")
@@ -315,6 +347,7 @@ def main(args) -> None:
     print(f"nruns             | {args.nruns}")
     print(f"thread pool       | {args.thread_pool_threads}")
     print(f"GDS threshold     | {format_bytes(args.gds_threshold)}")
+    print(f"compat mode       | {args.compat_mode}")
     print(f"pre-reg-buf       | {args.pre_register_buffer}")
     print(f"high-reuse warmup | {args.warm_high_reuse}")
     print("====================================")
@@ -326,9 +359,14 @@ def main(args) -> None:
             context = Context(args.request_size, concurrency, reuse)
 
             for run_idx in range(1, args.nruns + 1):
-                # Same offsets are reused across policies for a given
-                # (context, run), making policy comparisons paired/fair.
-                seed = args.seed + run_idx + 1009 * concurrency + (0 if reuse == "low" else 1000003)
+                # Paired comparison: every policy sees the exact same request
+                # stream for a given (context, run).
+                seed = (
+                    args.seed
+                    + run_idx
+                    + 1009 * concurrency
+                    + (0 if reuse == "low" else 1000003)
+                )
                 offsets = _generate_offsets(
                     reuse=reuse,
                     request_size=context.request_size,
@@ -340,10 +378,9 @@ def main(args) -> None:
                 reuse_ratio = _reuse_ratio(offsets)
 
                 for policy in args.policy:
-                    if reuse == "high":
-                        _warm_reuse_set(args, file_path, offsets, policy)
-
-                    config = _policy_config(policy, args.gds_threshold)
+                    config = _policy_config(
+                        policy, args.gds_threshold, args.compat_mode
+                    )
                     config["num_threads"] = args.thread_pool_threads
 
                     with kvikio.defaults.set(config):
@@ -353,6 +390,7 @@ def main(args) -> None:
                             context.request_size,
                             context.concurrency,
                             args.pre_register_buffer,
+                            warmup=(reuse == "high" and args.warm_high_reuse),
                         )
 
                     expected = len(offsets) * context.request_size
@@ -360,20 +398,22 @@ def main(args) -> None:
                         raise RuntimeError(
                             f"I/O mismatch: expected {expected} bytes, got {logical_bytes}"
                         )
+
                     throughput = logical_bytes / elapsed
-                    result = RunResult(
-                        policy=policy,
-                        request_size=context.request_size,
-                        concurrency=context.concurrency,
-                        reuse=context.reuse,
-                        run=run_idx,
-                        elapsed_s=elapsed,
-                        logical_bytes=logical_bytes,
-                        throughput_Bps=throughput,
-                        unique_offsets=len(set(offsets)),
-                        offset_reuse_ratio=reuse_ratio,
+                    rows.append(
+                        RunResult(
+                            policy=policy,
+                            request_size=context.request_size,
+                            concurrency=context.concurrency,
+                            reuse=context.reuse,
+                            run=run_idx,
+                            elapsed_s=elapsed,
+                            logical_bytes=logical_bytes,
+                            throughput_Bps=throughput,
+                            unique_offsets=len(set(offsets)),
+                            offset_reuse_ratio=reuse_ratio,
+                        )
                     )
-                    rows.append(result)
                     print(
                         f"run {run_idx:02d} | {policy:12s} | "
                         f"req={format_bytes(context.request_size):>9s} | "
@@ -434,7 +474,7 @@ if __name__ == "__main__":
         "--working-set",
         default="8 GiB",
         type=parse_bytes,
-        help="Aligned file/offset working-set size.",
+        help="Backing-file and request working-set size.",
     )
     parser.add_argument(
         "--requests-per-run",
@@ -446,7 +486,7 @@ if __name__ == "__main__":
         "--hotset-requests",
         default=32,
         type=int,
-        help="Number of distinct aligned offsets used by high-reuse mode.",
+        help="Distinct request-sized offsets used by high-reuse mode.",
     )
     parser.add_argument(
         "--nruns",
@@ -458,13 +498,19 @@ if __name__ == "__main__":
         "--thread-pool-threads",
         default=64,
         type=int,
-        help="KvikIO worker-thread count; held constant while concurrency varies.",
+        help="KvikIO worker count; held constant while concurrency varies.",
     )
     parser.add_argument(
         "--gds-threshold",
         default="16 KiB",
         type=parse_bytes,
-        help="Threshold used only by the native KvikIO-threshold baseline.",
+        help="Threshold used only by the KvikIO-threshold baseline.",
+    )
+    parser.add_argument(
+        "--compat-mode",
+        choices=tuple(COMPAT_MODE),
+        default="off",
+        help="KvikIO compatibility mode. Default off is required for real GDS.",
     )
     parser.add_argument(
         "--pre-register-buffer",
@@ -475,13 +521,12 @@ if __name__ == "__main__":
         "--warm-high-reuse",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Warm the high-reuse offset set before each timed run.",
+        help="Warm high-reuse offsets on the same CuFile handle before timing.",
     )
     parser.add_argument(
-        "--warmup-concurrency",
-        default=16,
-        type=int,
-        help="Concurrency used by the untimed high-reuse warm-up.",
+        "--prepare-file",
+        action="store_true",
+        help="Force recreation of the dense backing file before the experiment.",
     )
     parser.add_argument(
         "--seed",
