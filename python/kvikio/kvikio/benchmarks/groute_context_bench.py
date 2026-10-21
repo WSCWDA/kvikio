@@ -21,9 +21,12 @@ Example
       --nruns 1 \
       --csv /mnt/gds/results/groute-context/smoke.csv
 
-For cold-cache experiments, drop Linux caches *outside* the benchmark process:
-
-    sync; echo 3 > /proc/sys/vm/drop_caches
+By default, Linux page/inode/dentry caches are dropped immediately before each
+policy run. This makes low-reuse comparisons start from an equivalent cold
+cache state. For ``high`` reuse, caches are dropped before the run, followed by
+an untimed warm-up on the same CuFile handle, and then the timed pass. Disable
+this behavior with ``--no-drop-caches`` when intentionally studying naturally
+warmed cache state.
 
 The benchmark forces KvikIO compatibility mode OFF by default so that a forced
 GDS policy actually exercises libcufile. Use ``--compat-mode auto`` only when
@@ -109,6 +112,28 @@ def _validate_args(args) -> None:
     for c in args.concurrency:
         if c < 1:
             raise ValueError("all --concurrency values must be >= 1")
+
+
+def _drop_linux_caches() -> None:
+    """Drop Linux page, inode, and dentry caches.
+
+    The benchmark intentionally performs this immediately before each policy
+    run so all policies begin from an equivalent cache state. Writing to
+    ``/proc/sys/vm/drop_caches`` normally requires root privileges.
+    """
+    os.sync()
+    try:
+        with open("/proc/sys/vm/drop_caches", "w") as f:
+            f.write("3\n")
+    except PermissionError as exc:
+        raise RuntimeError(
+            "Unable to drop Linux caches. Run as root or use --no-drop-caches."
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(
+            "Failed to write /proc/sys/vm/drop_caches. "
+            "Use --no-drop-caches to disable cache dropping."
+        ) from exc
 
 
 def _file_is_sparse(path: pathlib.Path, nbytes: int) -> bool:
@@ -348,6 +373,7 @@ def main(args) -> None:
     print(f"thread pool       | {args.thread_pool_threads}")
     print(f"GDS threshold     | {format_bytes(args.gds_threshold)}")
     print(f"compat mode       | {args.compat_mode}")
+    print(f"drop caches       | {args.drop_caches}")
     print(f"pre-reg-buf       | {args.pre_register_buffer}")
     print(f"high-reuse warmup | {args.warm_high_reuse}")
     print("====================================")
@@ -378,6 +404,9 @@ def main(args) -> None:
                 reuse_ratio = _reuse_ratio(offsets)
 
                 for policy in args.policy:
+                    if args.drop_caches:
+                        _drop_linux_caches()
+
                     config = _policy_config(
                         policy, args.gds_threshold, args.compat_mode
                     )
@@ -511,6 +540,15 @@ if __name__ == "__main__":
         choices=tuple(COMPAT_MODE),
         default="off",
         help="KvikIO compatibility mode. Default off is required for real GDS.",
+    )
+    parser.add_argument(
+        "--drop-caches",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Drop Linux page/inode/dentry caches immediately before every "
+            "policy run (default: enabled)."
+        ),
     )
     parser.add_argument(
         "--pre-register-buffer",
