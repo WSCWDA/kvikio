@@ -180,6 +180,24 @@ defaults::defaults()
     _host_cache_region_size         = region_size;
     _host_cache_admission_threshold = admission_threshold;
     _host_cache_max_regions         = max_regions;
+    _host_cache_line_admission = getenv_or("KVIKIO_HOST_CACHE_LINE_ADMISSION", false);
+    KVIKIO_EXPECT(!_host_cache_line_admission || admission_threshold <= 15,
+                  "line admission requires threshold in [1, 15]", std::invalid_argument);
+    auto const sketch_bytes = getenv_or("KVIKIO_HOST_CACHE_SKETCH_BYTES", 64 * 1024);
+    auto const aging = getenv_or("KVIKIO_HOST_CACHE_AGING_INTERVAL", 256);
+    auto const hit_ns = getenv_or("KVIKIO_HOST_CACHE_HIT_NS", 10000);
+    auto const fill_ns = getenv_or("KVIKIO_HOST_CACHE_FILL_NS", 120000);
+    auto const host_ns = getenv_or("KVIKIO_HOST_CACHE_HOST_BYPASS_NS", 80000);
+    auto const gds_ns = getenv_or("KVIKIO_HOST_CACHE_GDS_BYPASS_NS", 80000);
+    KVIKIO_EXPECT(sketch_bytes >= 64 && sketch_bytes % 64 == 0 && aging > 0 &&
+                    hit_ns > 0 && fill_ns > 0 && host_ns > 0 && gds_ns > 0,
+                  "invalid host cache sketch or cost configuration", std::invalid_argument);
+    _host_cache_sketch_bytes = sketch_bytes;
+    _host_cache_aging_interval = aging;
+    _host_cache_hit_ns = hit_ns;
+    _host_cache_fill_ns = fill_ns;
+    _host_cache_host_bypass_ns = host_ns;
+    _host_cache_gds_bypass_ns = gds_ns;
   }
   // Request shaping is experimental and opt-in.
   {
@@ -365,6 +383,8 @@ void defaults::set_host_cache_admission_threshold(std::size_t accesses)
   KVIKIO_EXPECT(accesses > 0 && accesses <= 255,
                 "host cache admission threshold must be in [1, 255]",
                 std::invalid_argument);
+  KVIKIO_EXPECT(!host_cache_line_admission() || accesses <= 15,
+                "line admission requires threshold in [1, 15]", std::invalid_argument);
   instance()->_host_cache_admission_threshold = accesses;
 }
 
@@ -376,6 +396,51 @@ void defaults::set_host_cache_max_regions(std::size_t regions)
                 "host cache max regions must be positive",
                 std::invalid_argument);
   instance()->_host_cache_max_regions = regions;
+}
+
+bool defaults::host_cache_line_admission() { return instance()->_host_cache_line_admission; }
+void defaults::set_host_cache_line_admission(bool enabled)
+{
+  KVIKIO_EXPECT(!enabled || host_cache_admission_threshold() <= 15,
+                "line admission requires threshold in [1, 15]", std::invalid_argument);
+  instance()->_host_cache_line_admission = enabled;
+}
+std::size_t defaults::host_cache_sketch_bytes() { return instance()->_host_cache_sketch_bytes; }
+void defaults::set_host_cache_sketch_bytes(std::size_t bytes)
+{
+  KVIKIO_EXPECT(bytes >= 64 && bytes % 64 == 0, "sketch size must be a multiple of 64 bytes",
+                std::invalid_argument);
+  instance()->_host_cache_sketch_bytes = bytes;
+}
+std::size_t defaults::host_cache_aging_interval() { return instance()->_host_cache_aging_interval; }
+void defaults::set_host_cache_aging_interval(std::size_t requests)
+{
+  KVIKIO_EXPECT(requests > 0, "aging interval must be positive", std::invalid_argument);
+  instance()->_host_cache_aging_interval = requests;
+}
+std::size_t defaults::host_cache_hit_ns() { return instance()->_host_cache_hit_ns; }
+void defaults::set_host_cache_hit_ns(std::size_t ns)
+{
+  KVIKIO_EXPECT(ns > 0, "host cache cost must be positive", std::invalid_argument);
+  instance()->_host_cache_hit_ns = ns;
+}
+std::size_t defaults::host_cache_fill_ns() { return instance()->_host_cache_fill_ns; }
+void defaults::set_host_cache_fill_ns(std::size_t ns)
+{
+  KVIKIO_EXPECT(ns > 0, "host cache cost must be positive", std::invalid_argument);
+  instance()->_host_cache_fill_ns = ns;
+}
+std::size_t defaults::host_cache_host_bypass_ns() { return instance()->_host_cache_host_bypass_ns; }
+void defaults::set_host_cache_host_bypass_ns(std::size_t ns)
+{
+  KVIKIO_EXPECT(ns > 0, "host cache cost must be positive", std::invalid_argument);
+  instance()->_host_cache_host_bypass_ns = ns;
+}
+std::size_t defaults::host_cache_gds_bypass_ns() { return instance()->_host_cache_gds_bypass_ns; }
+void defaults::set_host_cache_gds_bypass_ns(std::size_t ns)
+{
+  KVIKIO_EXPECT(ns > 0, "host cache cost must be positive", std::invalid_argument);
+  instance()->_host_cache_gds_bypass_ns = ns;
 }
 
 std::size_t defaults::http_max_attempts() { return instance()->_http_max_attempts; }

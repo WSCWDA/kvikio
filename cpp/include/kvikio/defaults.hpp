@@ -130,6 +130,13 @@ class defaults {
   std::size_t _host_cache_region_size;
   std::size_t _host_cache_admission_threshold;
   std::size_t _host_cache_max_regions;
+  bool _host_cache_line_admission;
+  std::size_t _host_cache_sketch_bytes;
+  std::size_t _host_cache_aging_interval;
+  std::size_t _host_cache_hit_ns;
+  std::size_t _host_cache_fill_ns;
+  std::size_t _host_cache_host_bypass_ns;
+  std::size_t _host_cache_gds_bypass_ns;
   std::size_t _http_max_attempts;
   long _http_timeout;
   std::vector<int> _http_status_codes;
@@ -370,6 +377,22 @@ class defaults {
   /** @brief Maximum number of regions retained by the admission metadata table. */
   [[nodiscard]] static std::size_t host_cache_max_regions();
   static void set_host_cache_max_regions(std::size_t regions);
+
+  /** Opt-in cache-line reuse sketch; false retains the region-admission baseline. */
+  [[nodiscard]] static bool host_cache_line_admission();
+  static void set_host_cache_line_admission(bool enabled);
+  [[nodiscard]] static std::size_t host_cache_sketch_bytes();
+  static void set_host_cache_sketch_bytes(std::size_t bytes);
+  [[nodiscard]] static std::size_t host_cache_aging_interval();
+  static void set_host_cache_aging_interval(std::size_t requests);
+  [[nodiscard]] static std::size_t host_cache_hit_ns();
+  static void set_host_cache_hit_ns(std::size_t ns);
+  [[nodiscard]] static std::size_t host_cache_fill_ns();
+  static void set_host_cache_fill_ns(std::size_t ns);
+  [[nodiscard]] static std::size_t host_cache_host_bypass_ns();
+  static void set_host_cache_host_bypass_ns(std::size_t ns);
+  [[nodiscard]] static std::size_t host_cache_gds_bypass_ns();
+  static void set_host_cache_gds_bypass_ns(std::size_t ns);
 
   /**
    * @brief Get the maximum number of attempts per remote IO read.

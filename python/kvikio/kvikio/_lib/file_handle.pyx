@@ -105,6 +105,10 @@ cdef extern from "<kvikio/file_handle.hpp>" namespace "kvikio" nogil:
         uint64_t batch_calls
         uint64_t batch_cache_reads
         uint64_t pinned_bypasses
+        uint64_t sketch_bytes
+        uint64_t sketch_aging_steps
+        uint64_t benefit_bypasses
+        uint64_t admitted_lines
 
     cdef cppclass RequestShaperStats:
         uint64_t logical_requests
@@ -242,6 +246,10 @@ cdef class CuFile:
             "batch_calls": result.batch_calls,
             "batch_cache_reads": result.batch_cache_reads,
             "pinned_bypasses": result.pinned_bypasses,
+            "sketch_bytes": result.sketch_bytes,
+            "sketch_aging_steps": result.sketch_aging_steps,
+            "benefit_bypasses": result.benefit_bypasses,
+            "admitted_lines": result.admitted_lines,
         }
 
     def io_context(self) -> dict:

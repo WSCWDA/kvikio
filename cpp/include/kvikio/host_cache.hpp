@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <kvikio/error.hpp>
+#include <kvikio/line_admission.hpp>
 #include <kvikio/shim/cuda.hpp>
 
 namespace kvikio {
@@ -38,6 +39,10 @@ struct HostCacheStats {
   std::uint64_t batch_calls{};
   std::uint64_t batch_cache_reads{};
   std::uint64_t pinned_bypasses{};
+  std::uint64_t sketch_bytes{};
+  std::uint64_t sketch_aging_steps{};
+  std::uint64_t benefit_bypasses{};
+  std::uint64_t admitted_lines{};
 };
 
 namespace detail {
@@ -102,7 +107,12 @@ class HostCache {
             std::size_t max_io_size,
             std::size_t region_size,
             std::size_t admission_threshold,
-            std::size_t max_regions);
+            std::size_t max_regions,
+            bool line_admission = false,
+            std::size_t sketch_bytes = 64 * 1024,
+            std::size_t aging_interval = 256,
+            std::uint64_t hit_ns = 10000,
+            std::uint64_t fill_ns = 120000);
   HostCache(HostCache const&)            = delete;
   HostCache& operator=(HostCache const&) = delete;
   HostCache(HostCache&&)                 = delete;
@@ -110,13 +120,15 @@ class HostCache {
   ~HostCache() noexcept;
 
   [[nodiscard]] bool eligible(std::size_t size, std::size_t file_offset) const noexcept;
+  [[nodiscard]] bool line_admission_enabled() const noexcept;
 
   std::optional<std::size_t> read(int fd_direct_off,
                                   int fd_direct_on,
                                   void* dev_ptr_base,
                                   std::size_t size,
                                   std::size_t file_offset,
-                                  std::size_t dev_ptr_offset);
+                                  std::size_t dev_ptr_offset,
+                                  std::uint64_t bypass_ns = 80000);
 
   /**
    * @brief Copy eligible cached reads to GPU on one stream and synchronize once per batch.
@@ -128,7 +140,8 @@ class HostCache {
     int fd_direct_off,
     int fd_direct_on,
     std::vector<HostCacheReadRequest> const& requests,
-    CUstream stream);
+    CUstream stream,
+    std::uint64_t bypass_ns = 80000);
 
   void clear() noexcept;
   [[nodiscard]] HostCacheStats stats() const noexcept;

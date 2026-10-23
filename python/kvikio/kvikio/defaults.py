@@ -63,6 +63,13 @@ class ConfigContextManager:
             "host_cache_region_size",
             "host_cache_admission_threshold",
             "host_cache_max_regions",
+            "host_cache_line_admission",
+            "host_cache_sketch_bytes",
+            "host_cache_aging_interval",
+            "host_cache_hit_ns",
+            "host_cache_fill_ns",
+            "host_cache_host_bypass_ns",
+            "host_cache_gds_bypass_ns",
             "http_max_attempts",
             "http_status_codes",
             "http_timeout",
@@ -143,6 +150,13 @@ def set(*config) -> ConfigContextManager:
         - ``"host_cache_region_size"``
         - ``"host_cache_admission_threshold"``
         - ``"host_cache_max_regions"``
+        - ``"host_cache_line_admission"``
+        - ``"host_cache_sketch_bytes"``
+        - ``"host_cache_aging_interval"``
+        - ``"host_cache_hit_ns"``
+        - ``"host_cache_fill_ns"``
+        - ``"host_cache_host_bypass_ns"``
+        - ``"host_cache_gds_bypass_ns"``
         - ``"http_max_attempts"``
         - ``"http_status_codes"``
         - ``"http_timeout"``
@@ -199,6 +213,13 @@ def get(config_name: str) -> Any:
         - ``"host_cache_region_size"``
         - ``"host_cache_admission_threshold"``
         - ``"host_cache_max_regions"``
+        - ``"host_cache_line_admission"``
+        - ``"host_cache_sketch_bytes"``
+        - ``"host_cache_aging_interval"``
+        - ``"host_cache_hit_ns"``
+        - ``"host_cache_fill_ns"``
+        - ``"host_cache_host_bypass_ns"``
+        - ``"host_cache_gds_bypass_ns"``
         - ``"http_max_attempts"``
         - ``"http_status_codes"``
         - ``"http_timeout"``
