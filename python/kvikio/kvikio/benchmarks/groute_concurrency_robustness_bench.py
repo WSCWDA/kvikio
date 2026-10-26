@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import pathlib
 import statistics
 
 from dask.utils import parse_bytes
@@ -41,9 +42,7 @@ def _summarize_penalty(rows, output_csv):
 
     print("\nConcurrency robustness")
     print("======================")
-    print(
-        "C    GDS GiB/s    Auto GiB/s   Auto/GDS   Penalty"
-    )
+    print("C    GDS GiB/s    Auto GiB/s   Auto/GDS   Penalty")
 
     penalties = []
     ratios = []
@@ -103,14 +102,13 @@ def _summarize_penalty(rows, output_csv):
         writer.writerows(summary_rows)
 
     print(f"penalty CSV    | {output_csv}")
-
     return mean_penalty, worst_penalty
 
 
 def main(args) -> None:
-    # This test intentionally covers a region that prior characterization found
-    # to be GDS-dominant: fixed 64-KiB, cold, low-reuse reads. Logical
-    # concurrency is the only changing context dimension.
+    # Prior characterization shows this region is GDS-dominant on the
+    # evaluation platform: fixed 64-KiB, cold, low-reuse reads. Logical
+    # concurrency is therefore the only changing context dimension.
     contexts = [
         Context(
             request_size=args.request_size,
@@ -171,7 +169,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--penalty-csv",
-        type=__import__("pathlib").Path,
+        type=pathlib.Path,
         default=None,
         help="Optional per-concurrency Auto/GDS penalty summary CSV.",
     )
