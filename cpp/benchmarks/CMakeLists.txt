@@ -1,6 +1,6 @@
 # =============================================================================
 # cmake-format: off
-# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION.
 # SPDX-License-Identifier: Apache-2.0
 # cmake-format: on
 # =============================================================================
@@ -63,3 +63,6 @@ kvikio_add_benchmark(NAME THREADPOOL_BENCHMARK SOURCES "threadpool/threadpool_be
 
 kvikio_add_benchmark(NAME REQUEST_SHAPER_BENCHMARK
                      SOURCES "request_shaper/request_shaper_benchmark.cpp")
+
+kvikio_add_benchmark(NAME GROUTE_DECISION_OVERHEAD_BENCHMARK
+                     SOURCES "groute_decision_overhead.cpp")
