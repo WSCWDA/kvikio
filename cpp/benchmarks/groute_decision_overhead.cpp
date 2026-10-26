@@ -39,13 +39,13 @@ void set_manual_ns_per_request(benchmark::State& state,
 /*
  * Build a runtime request-size stream for the static-threshold benchmark.
  * The stream is deliberately generated at runtime (outside the timed region)
- * so the compiler cannot constant-fold the threshold decision. Roughly half
- * of the requests fall below the 16-KiB threshold and half at/above it.
+ * so the compiler cannot constant-fold the threshold decision. Half of the
+ * candidate sizes fall below the 16-KiB threshold and half at/above it.
  */
 std::vector<std::size_t> make_threshold_sizes()
 {
   constexpr std::size_t candidates[] = {
-    4 * 1024, 8 * 1024, 12 * 1024, 16 * 1024, 32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024};
+    1 * 1024, 4 * 1024, 8 * 1024, 12 * 1024, 16 * 1024, 32 * 1024, 64 * 1024, 128 * 1024};
 
   std::vector<std::size_t> sizes(threshold_requests);
   std::uint64_t x = 0x9e3779b97f4a7c15ULL;
