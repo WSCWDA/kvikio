@@ -5,6 +5,8 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <vector>
 
 #include <kvikio/io_context.hpp>
 
@@ -14,7 +16,9 @@ namespace {
 
 constexpr std::size_t request_size        = 64 * 1024;
 constexpr std::size_t request_stride      = 64 * 1024;
+constexpr std::size_t gds_threshold       = 16 * 1024;
 constexpr std::size_t baseline_requests   = kvikio::IOContext::profile_request_limit;
+constexpr std::size_t threshold_requests  = 4096;
 constexpr std::size_t tracking_requests   = kvikio::IOContext::profile_request_limit - 1;
 constexpr std::size_t profiling_requests  = kvikio::IOContext::profile_request_limit;
 constexpr std::size_t steady_requests     = 4096;
@@ -33,11 +37,34 @@ void set_manual_ns_per_request(benchmark::State& state,
 }
 
 /*
- * Fixed-path baseline: measure only the policy lookup that the I/O fast path
- * performs after routing has already been decided. No context observation is
- * executed here.
+ * Build a runtime request-size stream for the static-threshold benchmark.
+ * The stream is deliberately generated at runtime (outside the timed region)
+ * so the compiler cannot constant-fold the threshold decision. Roughly half
+ * of the requests fall below the 16-KiB threshold and half at/above it.
  */
-void BM_GRouteBaseline(benchmark::State& state)
+std::vector<std::size_t> make_threshold_sizes()
+{
+  constexpr std::size_t candidates[] = {
+    4 * 1024, 8 * 1024, 12 * 1024, 16 * 1024, 32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024};
+
+  std::vector<std::size_t> sizes(threshold_requests);
+  std::uint64_t x = 0x9e3779b97f4a7c15ULL;
+  for (std::size_t i = 0; i < sizes.size(); ++i) {
+    // Small deterministic xorshift sequence; generation is not timed.
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    sizes[i] = candidates[x % (sizeof(candidates) / sizeof(candidates[0]))];
+  }
+  return sizes;
+}
+
+/*
+ * Fixed-path lower bound: routing is already decided and the fast path only
+ * reads the installed IOPolicy. This is an idealized lower bound, not a
+ * realistic adaptive-routing baseline.
+ */
+void BM_GRouteFixedPathLowerBound(benchmark::State& state)
 {
   kvikio::IOContext context{/*host_cache_available=*/true,
                             /*request_shaping_available=*/false,
@@ -55,6 +82,30 @@ void BM_GRouteBaseline(benchmark::State& state)
   }
 
   state.counters["requests_per_sample"] = static_cast<double>(baseline_requests);
+}
+
+/*
+ * KvikIO-style static size-threshold routing. This measures only the runtime
+ * routing decision itself: compare the request size against gds_threshold and
+ * materialize the selected path. No storage I/O is issued.
+ */
+void BM_GRouteStaticThreshold(benchmark::State& state)
+{
+  auto const sizes = make_threshold_sizes();
+
+  for (auto _ : state) {
+    auto const begin = clock_type::now();
+    for (std::size_t i = 0; i < sizes.size(); ++i) {
+      auto const size = sizes[i];
+      auto path = size < gds_threshold ? kvikio::IOPath::HOST_MEDIATED : kvikio::IOPath::GPU_DIRECT;
+      benchmark::DoNotOptimize(path);
+    }
+    auto const end = clock_type::now();
+    set_manual_ns_per_request(state, begin, end, sizes.size());
+  }
+
+  state.counters["requests_per_sample"] = static_cast<double>(sizes.size());
+  state.counters["threshold_KiB"]       = static_cast<double>(gds_threshold / 1024);
 }
 
 /*
@@ -120,7 +171,7 @@ void BM_GRouteAutoProfiling(benchmark::State& state)
 /*
  * AUTO steady-state cost: complete profiling outside the timed region, then
  * measure the normal post-classification fast path. In the current IOContext
- * implementation observe() performs only the request/byte counters after the
+ * implementation observe() updates only the request/byte counters after the
  * 64-request window, followed by the stable policy lookup.
  */
 void BM_GRouteAutoSteadyState(benchmark::State& state)
@@ -155,7 +206,8 @@ void BM_GRouteAutoSteadyState(benchmark::State& state)
   state.counters["requests_per_sample"] = static_cast<double>(steady_requests);
 }
 
-BENCHMARK(BM_GRouteBaseline)->UseManualTime()->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_GRouteFixedPathLowerBound)->UseManualTime()->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_GRouteStaticThreshold)->UseManualTime()->Unit(benchmark::kNanosecond);
 BENCHMARK(BM_GRouteTrackingOnly)->UseManualTime()->Unit(benchmark::kNanosecond);
 BENCHMARK(BM_GRouteAutoProfiling)->UseManualTime()->Unit(benchmark::kNanosecond);
 BENCHMARK(BM_GRouteAutoSteadyState)->UseManualTime()->Unit(benchmark::kNanosecond);
