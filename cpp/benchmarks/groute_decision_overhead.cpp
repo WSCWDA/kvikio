@@ -47,7 +47,7 @@ void BM_GRouteBaseline(benchmark::State& state)
   for (auto _ : state) {
     auto const begin = clock_type::now();
     for (std::size_t i = 0; i < baseline_requests; ++i) {
-      auto const policy = context.policy();
+      auto policy = context.policy();
       benchmark::DoNotOptimize(policy);
     }
     auto const end = clock_type::now();
@@ -76,7 +76,7 @@ void BM_GRouteTrackingOnly(benchmark::State& state)
     auto const begin = clock_type::now();
     for (std::size_t i = 0; i < tracking_requests; ++i) {
       context.observe(request_size, offset_for(i));
-      auto const policy = context.policy();
+      auto policy = context.policy();
       benchmark::DoNotOptimize(policy);
     }
     auto const end = clock_type::now();
@@ -105,12 +105,13 @@ void BM_GRouteAutoProfiling(benchmark::State& state)
     auto const begin = clock_type::now();
     for (std::size_t i = 0; i < profiling_requests; ++i) {
       context.observe(request_size, offset_for(i));
-      auto const policy = context.policy();
+      auto policy = context.policy();
       benchmark::DoNotOptimize(policy);
     }
     auto const end = clock_type::now();
     set_manual_ns_per_request(state, begin, end, profiling_requests);
-    benchmark::DoNotOptimize(context.profile_complete());
+    auto profile_complete = context.profile_complete();
+    benchmark::DoNotOptimize(profile_complete);
   }
 
   state.counters["requests_per_sample"] = static_cast<double>(profiling_requests);
@@ -131,7 +132,8 @@ void BM_GRouteAutoSteadyState(benchmark::State& state)
 
   for (std::size_t i = 0; i < profiling_requests; ++i) {
     context.observe(request_size, offset_for(i));
-    benchmark::DoNotOptimize(context.policy());
+    auto policy = context.policy();
+    benchmark::DoNotOptimize(policy);
   }
   if (!context.profile_complete()) {
     state.SkipWithError("AUTO profiling did not complete");
@@ -143,7 +145,7 @@ void BM_GRouteAutoSteadyState(benchmark::State& state)
     auto const begin = clock_type::now();
     for (std::size_t i = 0; i < steady_requests; ++i, ++request_index) {
       context.observe(request_size, offset_for(request_index));
-      auto const policy = context.policy();
+      auto policy = context.policy();
       benchmark::DoNotOptimize(policy);
     }
     auto const end = clock_type::now();
