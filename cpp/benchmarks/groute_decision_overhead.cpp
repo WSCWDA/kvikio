@@ -12,12 +12,12 @@
 
 namespace {
 
-constexpr std::size_t request_size = 64 * 1024;
-constexpr std::size_t request_stride = 64 * 1024;
-constexpr std::size_t baseline_requests = kvikio::IOContext::profile_request_limit;
-constexpr std::size_t tracking_requests = kvikio::IOContext::profile_request_limit - 1;
-constexpr std::size_t profiling_requests = kvikio::IOContext::profile_request_limit;
-constexpr std::size_t steady_requests = 4096;
+constexpr std::size_t request_size        = 64 * 1024;
+constexpr std::size_t request_stride      = 64 * 1024;
+constexpr std::size_t baseline_requests   = kvikio::IOContext::profile_request_limit;
+constexpr std::size_t tracking_requests   = kvikio::IOContext::profile_request_limit - 1;
+constexpr std::size_t profiling_requests  = kvikio::IOContext::profile_request_limit;
+constexpr std::size_t steady_requests     = 4096;
 
 using clock_type = std::chrono::steady_clock;
 
@@ -61,6 +61,7 @@ void BM_GRouteBaseline(benchmark::State& state)
  * Tracking-only cost: use a forced GDS policy and measure observe()+policy()
  * for the first 63 requests. Stopping before request 64 deliberately excludes
  * IOContext::classify(), isolating bounded context tracking from classification.
+ * context.reset() is intentionally outside the manually timed interval.
  */
 void BM_GRouteTrackingOnly(benchmark::State& state)
 {
@@ -70,9 +71,7 @@ void BM_GRouteTrackingOnly(benchmark::State& state)
                             kvikio::PolicyMode::GDS_DIRECT};
 
   for (auto _ : state) {
-    state.PauseTiming();
     context.reset();
-    state.ResumeTiming();
 
     auto const begin = clock_type::now();
     for (std::size_t i = 0; i < tracking_requests; ++i) {
@@ -91,7 +90,7 @@ void BM_GRouteTrackingOnly(benchmark::State& state)
  * AUTO profiling cost: measure the complete 64-request profiling window.
  * The 64th observation invokes classify(), so the reported average includes
  * tracking, policy lookup, and the one-time classification cost amortized over
- * the profiling window.
+ * the profiling window. reset() is outside the manually timed interval.
  */
 void BM_GRouteAutoProfiling(benchmark::State& state)
 {
@@ -101,9 +100,7 @@ void BM_GRouteAutoProfiling(benchmark::State& state)
                             kvikio::PolicyMode::AUTO};
 
   for (auto _ : state) {
-    state.PauseTiming();
     context.reset();
-    state.ResumeTiming();
 
     auto const begin = clock_type::now();
     for (std::size_t i = 0; i < profiling_requests; ++i) {
@@ -136,7 +133,10 @@ void BM_GRouteAutoSteadyState(benchmark::State& state)
     context.observe(request_size, offset_for(i));
     benchmark::DoNotOptimize(context.policy());
   }
-  if (!context.profile_complete()) { state.SkipWithError("AUTO profiling did not complete"); }
+  if (!context.profile_complete()) {
+    state.SkipWithError("AUTO profiling did not complete");
+    return;
+  }
 
   std::size_t request_index = profiling_requests;
   for (auto _ : state) {
