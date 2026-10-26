@@ -183,8 +183,16 @@ def _validate_common(args, contexts: list[Context]) -> None:
         raise ValueError("--thread-pool-threads must be >= 1")
 
     for context in contexts:
-        if context.request_size % ALIGNMENT != 0:
-            raise ValueError("all request sizes must be 4-KiB aligned")
+        if context.request_size < 1:
+            raise ValueError("request size must be >= 1 byte")
+        # Sub-page requests are intentionally supported for the size-sensitivity
+        # experiment. Keep larger requests page-aligned so request size remains
+        # the only changing variable rather than mixing in arbitrary alignment.
+        if context.request_size >= ALIGNMENT and context.request_size % ALIGNMENT != 0:
+            raise ValueError(
+                "request sizes >= 4 KiB must be 4-KiB aligned; "
+                "sub-4-KiB request sizes are allowed"
+            )
         if context.request_size > args.working_set:
             raise ValueError("request size must not exceed --working-set")
         if context.concurrency < 1:
@@ -242,8 +250,14 @@ def ensure_file(path: pathlib.Path, nbytes: int, force_prepare: bool) -> None:
 
 
 def _valid_request_offsets(working_set: int, request_size: int) -> list[int]:
-    """Return non-overlapping request-sized slots."""
-    return list(range(0, working_set - request_size + 1, request_size))
+    """Return non-overlapping request slots with page-aligned starts.
+
+    For requests smaller than 4 KiB, starts remain 4-KiB aligned. This isolates
+    request-size sensitivity from file-offset alignment and avoids turning a
+    sub-page size sweep into an alignment experiment.
+    """
+    stride = max(request_size, ALIGNMENT)
+    return list(range(0, working_set - request_size + 1, stride))
 
 
 def generate_offsets(
@@ -536,12 +550,11 @@ def run_context_benchmark(
                 print(
                     f"run {run_idx:02d} | {policy:12s} | "
                     f"req={format_bytes(context.request_size):>9s} | "
-                    f"C={context.concurrency:>3d} | "
-                    f"reuse={observed_reuse:>5.3f} | "
+                    f"C={context.concurrency:>3d} | reuse={observed_reuse:>5.3f} | "
                     f"{throughput / (1024**3):.3f} GiB/s"
                 )
 
     _write_csv(args.csv, rows)
     _print_summary(rows)
-    print(f"\nCSV written to: {args.csv}")
+    print(f"\nCSV: {args.csv}")
     return rows
