@@ -19,6 +19,7 @@
 #include <vector>
 
 #include <kvikio/bounce_buffer.hpp>
+#include <kvikio/defaults.hpp>
 #include <kvikio/detail/posix_io.hpp>
 #include <kvikio/detail/stream.hpp>
 #include <kvikio/host_cache.hpp>
@@ -153,11 +154,20 @@ class HostCache::Impl {
        std::size_t max_io_size,
        std::size_t region_size,
        std::size_t admission_threshold,
-       std::size_t max_regions)
+       std::size_t max_regions,
+       bool line_admission,
+       std::size_t sketch_bytes,
+       std::size_t aging_interval,
+       std::uint64_t hit_ns,
+       std::uint64_t fill_ns)
     : capacity{line_size == 0 ? 0 : capacity - capacity % line_size},
       line_size{line_size},
       max_io_size{max_io_size},
-      admission{region_size, line_size, admission_threshold, max_regions}
+      admission{region_size, line_size, admission_threshold, max_regions},
+      line_admission{line_admission},
+      line_tracker_bytes{line_admission ? sketch_bytes : 0},
+      line_tracker{line_admission ? std::make_unique<LineAdmission>(
+        line_size, sketch_bytes, aging_interval, admission_threshold, hit_ns, fill_ns) : nullptr}
   {
     KVIKIO_EXPECT(this->capacity >= line_size,
                   "host cache capacity must hold at least one cache line",
@@ -191,6 +201,9 @@ class HostCache::Impl {
   std::size_t line_size;
   std::size_t max_io_size;
   RegionAdmission admission;
+  bool line_admission;
+  std::size_t line_tracker_bytes;
+  std::unique_ptr<LineAdmission> line_tracker;
   mutable std::mutex mutex;
   std::condition_variable copies_complete;
   std::size_t outstanding_pins{};
@@ -213,9 +226,15 @@ HostCache::HostCache(std::size_t capacity,
                      std::size_t max_io_size,
                      std::size_t region_size,
                      std::size_t admission_threshold,
-                     std::size_t max_regions)
+                     std::size_t max_regions,
+                     bool line_admission,
+                     std::size_t sketch_bytes,
+                     std::size_t aging_interval,
+                     std::uint64_t hit_ns,
+                     std::uint64_t fill_ns)
   : _impl{std::make_unique<Impl>(
-      capacity, line_size, max_io_size, region_size, admission_threshold, max_regions)}
+      capacity, line_size, max_io_size, region_size, admission_threshold, max_regions,
+      line_admission, sketch_bytes, aging_interval, hit_ns, fill_ns)}
 {
 }
 
@@ -228,26 +247,31 @@ bool HostCache::eligible(std::size_t size, std::size_t file_offset) const noexce
   return size <= _impl->line_size - line_offset;
 }
 
+bool HostCache::line_admission_enabled() const noexcept { return _impl->line_admission; }
+
 std::optional<std::size_t> HostCache::read(int fd_direct_off,
                                            int fd_direct_on,
                                            void* dev_ptr_base,
                                            std::size_t size,
                                            std::size_t file_offset,
-                                           std::size_t dev_ptr_offset)
+                                           std::size_t dev_ptr_offset,
+                                           std::uint64_t bypass_ns)
 {
   if (!eligible(size, file_offset)) { return std::nullopt; }
   auto* destination = reinterpret_cast<void*>(
     reinterpret_cast<std::uintptr_t>(dev_ptr_base) + dev_ptr_offset);
   PushAndPopContext context_guard{get_context_from_pointer(dev_ptr_base)};
   auto const stream = StreamCachePerThreadAndContext::get();
-  return read_batch(fd_direct_off, fd_direct_on, {{destination, size, file_offset}}, stream)[0];
+  return read_batch(fd_direct_off, fd_direct_on, {{destination, size, file_offset}}, stream,
+                    bypass_ns)[0];
 }
 
 std::vector<std::optional<std::size_t>> HostCache::read_batch(
   int fd_direct_off,
   int fd_direct_on,
   std::vector<HostCacheReadRequest> const& requests,
-  CUstream stream)
+  CUstream stream,
+  std::uint64_t bypass_ns)
 {
   std::vector<std::optional<std::size_t>> results(requests.size());
   std::vector<std::size_t> pinned;
@@ -271,7 +295,9 @@ std::vector<std::optional<std::size_t>> HostCache::read_batch(
   try {
     for (std::size_t i = 0; i < requests.size(); ++i) {
       auto const& request = requests[i];
-      if (!eligible(request.size, request.file_offset)) { continue; }
+      if (!eligible(request.size, request.file_offset) || is_host_memory(request.device_ptr)) {
+        continue;
+      }
       auto const lock_start = _impl->profile ? Clock::now() : Clock::time_point{};
       std::unique_lock lock{_impl->mutex};
       if (_impl->profile) { _impl->counters.lookup_wait_ns += elapsed_ns(lock_start); }
@@ -283,7 +309,8 @@ std::vector<std::optional<std::size_t>> HostCache::read_batch(
       auto found            = _impl->entries.find(line_offset);
       if (found == _impl->entries.end()) {
         ++_impl->counters.misses;
-        if (!_impl->admission.should_admit(request.file_offset)) {
+        if (!(_impl->line_tracker ? _impl->line_tracker->should_admit(request.file_offset, bypass_ns)
+                                 : _impl->admission.should_admit(request.file_offset))) {
           _impl->counters.admission_bypass_bytes += request.size;
           if (_impl->profile) { _impl->counters.lookup_ns += elapsed_ns(lookup_start); }
           continue;
@@ -309,8 +336,10 @@ std::vector<std::optional<std::size_t>> HostCache::read_batch(
         ssize_t bytes_read{};
         try {
           auto const read_start = _impl->profile ? Clock::now() : Clock::time_point{};
+          // Match the POSIX bypass path: only attempt O_DIRECT when the read option is enabled.
+          auto const fill_fd_direct_on = defaults::auto_direct_io_read() ? fd_direct_on : -1;
           bytes_read = posix_host_io<IOOperationType::READ, PartialIO::YES>(
-            fd_direct_off, line, _impl->line_size, line_offset, fd_direct_on);
+            fd_direct_off, line, _impl->line_size, line_offset, fill_fd_direct_on);
           if (_impl->profile) {
             read_duration = elapsed_ns(read_start);
             _impl->counters.storage_read_ns += read_duration;
@@ -329,6 +358,7 @@ std::vector<std::optional<std::size_t>> HostCache::read_batch(
                   .first;
       } else {
         ++_impl->counters.hits;
+        if (_impl->line_tracker) { _impl->line_tracker->observe_hit(request.file_offset); }
         _impl->lru.splice(_impl->lru.begin(), _impl->lru, found->second.lru);
         found->second.lru = _impl->lru.begin();
       }
@@ -397,6 +427,7 @@ void HostCache::clear() noexcept
     _impl->free_slots.push_back(_impl->capacity / _impl->line_size - 1 - i);
   }
   _impl->admission.clear();
+  if (_impl->line_tracker) { _impl->line_tracker->clear(); }
 }
 
 HostCacheStats HostCache::stats() const noexcept
@@ -405,9 +436,16 @@ HostCacheStats HostCache::stats() const noexcept
   auto ret                 = _impl->counters;
   auto const admission     = _impl->admission.stats();
   ret.admitted_regions     = admission.admitted_regions;
-  ret.admission_bypasses   = admission.bypassed_requests;
+  ret.admission_bypasses   = _impl->line_tracker ? _impl->line_tracker->bypasses()
+                                                 : admission.bypassed_requests;
   ret.metadata_evictions   = admission.metadata_evictions;
   ret.tracked_regions      = admission.tracked_regions;
+  if (_impl->line_tracker) {
+    ret.sketch_bytes = _impl->line_tracker_bytes;
+    ret.sketch_aging_steps = _impl->line_tracker->aging_steps();
+    ret.benefit_bypasses = _impl->line_tracker->benefit_bypasses();
+    ret.admitted_lines = _impl->line_tracker->admissions();
+  }
   ret.cache_entries        = _impl->entries.size();
   return ret;
 }

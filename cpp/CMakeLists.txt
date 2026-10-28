@@ -161,6 +161,7 @@ set(SOURCES
     "src/compat_mode_manager.cpp"
     "src/http_status_codes.cpp"
     "src/host_cache.cpp"
+    "src/line_admission.cpp"
     "src/io_context.cpp"
     "src/request_shaper.cpp"
     "src/cufile/config.cpp"
